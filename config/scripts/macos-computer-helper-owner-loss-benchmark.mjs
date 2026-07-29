@@ -7,6 +7,7 @@ import path from 'node:path'
 const DEFAULT_TRIALS = 3
 const READY_TIMEOUT_MS = 5_000
 const SETTLE_MS = 2_000
+const EXPECTED_REAP_NOT_BEFORE_MS = 30_000
 const OWNER_DEADLINE_MS = 35_000
 const MIB = 1024 * 1024
 const repoRoot = path.resolve(import.meta.dirname, '..', '..')
@@ -28,7 +29,8 @@ function sleep(ms) {
 
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right)
-  return sorted[Math.floor(sorted.length / 2)]
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
 }
 
 function rssBytes(pid) {
@@ -75,10 +77,8 @@ async function runTrial(expectation) {
   writeFileSync(tokenPath, 'benchmark-token', { mode: 0o600 })
   const startedAt = performance.now()
   const child = spawn(helperPath, ['--agent', socketPath, '--token-file', tokenPath], {
-    stdio: ['ignore', 'ignore', 'pipe']
+    stdio: 'ignore'
   })
-  const stderr = []
-  child.stderr.on('data', (chunk) => stderr.push(String(chunk)))
   const exitState = { value: null }
   const exitPromise = new Promise((resolve) => {
     child.once('exit', (code, signal) => {
@@ -100,11 +100,12 @@ async function runTrial(expectation) {
     const exit = exitedBeforeDeadline?.exit ?? null
 
     if (expectation === 'reaped') {
-      if (retainedAfterDeadline || exit?.code !== 0) {
+      if (
+        retainedAfterDeadline ||
+        exit?.code !== 0 ||
+        exit.elapsedMs < EXPECTED_REAP_NOT_BEFORE_MS
+      ) {
         throw new Error(`Expected a clean helper exit after owner timeout: ${JSON.stringify(exit)}`)
-      }
-      if (!stderr.join('').includes('received no authenticated session before its deadline')) {
-        throw new Error('Helper exited without the owner-timeout diagnostic')
       }
     } else if (!retainedAfterDeadline) {
       throw new Error(`Expected the baseline helper to remain resident: ${JSON.stringify(exit)}`)
