@@ -103,6 +103,7 @@
     "test:e2e:terminal-ime-native": "node config/scripts/run-terminal-ibus-hangul-e2e.mjs",
     "test:e2e:computer": "vitest run --config tests/e2e/vitest.config.ts",
     "bench:idle-cpu": "pnpm run ensure:electron-runtime && node config/scripts/run-idle-cpu-benchmark.mjs",
+    "bench:macos-computer-helper-owner-loss": "node config/scripts/macos-computer-helper-owner-loss-benchmark.mjs",
     "bench:startup": "pnpm run ensure:electron-runtime && node tools/benchmarks/startup-time-bench.mjs",
     "bench:daemon-coldstart": "pnpm run ensure:electron-runtime && node tools/benchmarks/daemon-coldstart-bench.mjs",
     "bench:main-thread-jank": "pnpm run ensure:electron-runtime && node tools/benchmarks/main-thread-jank-bench.mjs",
