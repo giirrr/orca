@@ -27,7 +27,8 @@ function sleep(ms) {
 
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right)
-  return sorted[Math.floor(sorted.length / 2)]
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
 }
 
 function forceGc() {
@@ -78,8 +79,15 @@ async function verifyBlockedMainDetection(markerPath, sendHeartbeat) {
   const block = blockMainThread(VERIFY_BLOCK_MS)
   const detected = readMarker(markerPath)
   sendHeartbeat()
-  await sleep(VERIFY_CHECK_INTERVAL_MS * 4)
-  const resolved = readMarker(markerPath)
+  const deadline = Date.now() + VERIFY_TIMEOUT_MS
+  let resolved
+  do {
+    resolved = readMarker(markerPath)
+    if (resolved?.selfRecovered === true) {
+      break
+    }
+    await sleep(VERIFY_CHECK_INTERVAL_MS)
+  } while (Date.now() < deadline)
   const verified =
     detected?.detectedAt >= block.startedAt &&
     detected.detectedAt <= block.endedAt &&
@@ -148,6 +156,9 @@ async function measureWorker(markerPath) {
 }
 
 async function runInternal() {
+  if (process.platform !== 'darwin') {
+    throw new Error('The production watchdog is macOS-only; run this benchmark on macOS')
+  }
   const { app } = await import('electron')
   const boundary = process.env[BOUNDARY_ENV]
   const profileDir = mkdtempSync(path.join(tmpdir(), 'orca-watchdog-bench-'))

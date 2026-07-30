@@ -273,6 +273,9 @@ jobs:
       - name: Smoke packaged CLI
         run: node config/scripts/smoke-packaged-cli.mjs --app-dir=dist/linux-unpacked
 
+      - name: Smoke packaged hang watchdog worker
+        run: xvfb-run --auto-servernum node config/scripts/smoke-packaged-hang-watchdog-worker.mjs --app-dir=dist/linux-unpacked
+
   # Why: regression specs under tests/e2e/** used to merge green without ever
   # running — e2e.yml only fired on schedule/release (#10518). Path-filter so
   # ordinary PRs stay light; any E2E suite change still gets a full shard run.
