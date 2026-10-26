@@ -5,6 +5,7 @@ import {
   buildMobileAiVaultResumeLaunch,
   buildMobileAiVaultResumeCommand,
   createMobileAiVaultResumeMutationRegistry,
+  readMobileAiVaultResumeHost,
   readMobileRuntimeTerminalWindowsShell,
   resolveMobileAiVaultResumePlatform,
   resumeAiVaultSessionInTerminal
@@ -62,8 +63,6 @@ describe('buildMobileAiVaultResumeCommand', () => {
   })
 
   it('resumes OMP sessions by absolute transcript path like desktop', () => {
-    // Regression: custom OMP_CODING_AGENT_DIR / WSL-store sessions miss on an
-    // id lookup, so the forwarded filePath must win over the session id.
     expect(
       buildMobileAiVaultResumeCommand({
         session: session({
@@ -78,8 +77,7 @@ describe('buildMobileAiVaultResumeCommand', () => {
   })
 
   it('uses direct cmd syntax when the host Windows terminal is already cmd', () => {
-    // Why: resume text is typed into the live host tab. Nested `cmd /d /s /c`
-    // wrappers break interactive cmd quoting (see buildAiVaultResumeShellCommand).
+    // Resume is typed into an interactive shell; nested cmd wrappers break its quoting.
     const command = buildMobileAiVaultResumeCommand({
       session: session({
         agent: 'codex',
@@ -122,8 +120,7 @@ describe('buildMobileAiVaultResumeCommand', () => {
 
 describe('buildMobileAiVaultResumeLaunch', () => {
   it('routes Kimi through the resumable-agent startup plan', () => {
-    // Why: kimi joining RESUMABLE_TUI_AGENTS moves it off the plain command fallback, so the
-    // cd prefix Kimi needs (sessions are work-dir-scoped) must survive the new branch.
+    // Kimi resumes are cwd-scoped, so its launch branch must retain the cd prefix.
     const launch = buildMobileAiVaultResumeLaunch({
       session: session({
         agent: 'kimi',
@@ -208,14 +205,11 @@ describe('buildMobileAiVaultResumeLaunch', () => {
       agentArgs: '--model opus',
       agentEnv: { ANTHROPIC_BASE_URL: 'http://localhost:3000' }
     })
-    // Only bare real-home Codex resumes request env deletion.
     expect(launch.envToDelete).toBeUndefined()
   })
 
   it('deletes inherited Codex homes when resuming a real-home session like desktop', () => {
-    // Regression: a user agentDefaultEnv CODEX_HOME (or a stale daemon-
-    // inherited home) must not reroute a bare real-home resume typed into the
-    // created pane; desktop already strips the pair at pane spawn.
+    // Strip inherited/default CODEX_HOME when resuming a real-home Codex session.
     const launch = buildMobileAiVaultResumeLaunch({
       session: session({ agent: 'codex', sessionId: 'codex-1', codexHome: null }),
       hostPlatform: 'darwin',
@@ -225,6 +219,19 @@ describe('buildMobileAiVaultResumeLaunch', () => {
     })
     expect(launch.command).not.toContain('CODEX_HOME=')
     expect(launch.envToDelete).toEqual(['CODEX_HOME', 'ORCA_CODEX_HOME'])
+  })
+
+  it('names the conversation it resumes so the host can show it before the first turn', () => {
+    const codex = buildMobileAiVaultResumeLaunch({
+      session: session({ agent: 'codex', sessionId: 'codex-1' }),
+      hostPlatform: 'darwin'
+    })
+    expect(codex.resumeProviderSession).toEqual({ key: 'session_id', id: 'codex-1' })
+    const omp = buildMobileAiVaultResumeLaunch({
+      session: session({ agent: 'omp', sessionId: 'omp-1', filePath: '/custom/omp/s.jsonl' }),
+      hostPlatform: 'linux'
+    })
+    expect(omp.resumeProviderSession).toEqual({ key: 'session_id', id: 'omp-1' })
   })
 
   it('keeps managed-home Codex resumes free of env deletion', () => {
@@ -242,6 +249,75 @@ describe('buildMobileAiVaultResumeLaunch', () => {
 })
 
 describe('resumeAiVaultSessionInTerminal', () => {
+  it.each(['darwin', 'linux', 'win32'] as const)(
+    'lets the %s execution host select the Qoder resume command at creation',
+    async (hostPlatform) => {
+      const launch = buildMobileAiVaultResumeLaunch({
+        session: session({ agent: 'qoder', sessionId: 'same-qoder-session' }),
+        hostPlatform
+      })
+      const sendRequest = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          result: { tab: { type: 'terminal', id: 'tab-1', terminal: 'pty-1', title: 'Terminal' } }
+        })
+        .mockResolvedValueOnce({ ok: true, result: { send: { accepted: true } } })
+      await resumeAiVaultSessionInTerminal({ sendRequest }, 'worktree-1', {
+        ...launch,
+        clientMutationId: 'qoder-resume',
+        hostCapabilities: ['session.tabs.qoderOwnedCreate.v1']
+      })
+      expect(sendRequest).toHaveBeenCalledTimes(1)
+      expect(sendRequest).toHaveBeenCalledWith(
+        'session.tabs.createTerminal',
+        expect.objectContaining({
+          command: launch.command,
+          launchAgent: 'qoder',
+          launchConfig: launch.launchConfig
+        }),
+        { timeoutMs: RESUME_RPC_TIMEOUT_MS }
+      )
+      expect(launch.command).toContain('same-qoder-session')
+    }
+  )
+
+  it.each(
+    [undefined, [], ['aiVault.v1']].flatMap((hostCapabilities) =>
+      (['darwin', 'linux', 'win32'] as const).map((hostPlatform) => ({
+        hostCapabilities,
+        hostPlatform
+      }))
+    )
+  )(
+    'keeps the acknowledged-create fallback on an older $hostPlatform host',
+    async ({ hostCapabilities, hostPlatform }) => {
+      const launch = buildMobileAiVaultResumeLaunch({
+        session: session({ agent: 'qoder', sessionId: 'legacy-session' }),
+        hostPlatform
+      })
+      const sendRequest = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          result: { tab: { type: 'terminal', id: 'tab-1', terminal: 'pty-1', title: 'Terminal' } }
+        })
+        .mockResolvedValueOnce({ ok: true, result: { send: { accepted: true } } })
+      await resumeAiVaultSessionInTerminal({ sendRequest }, 'worktree-1', {
+        ...launch,
+        hostCapabilities,
+        clientMutationId: 'same-legacy-resume'
+      })
+      expect(sendRequest).toHaveBeenCalledTimes(2)
+      expect(sendRequest.mock.calls[0]?.[1]).not.toHaveProperty('command')
+      expect(sendRequest.mock.calls[1]).toEqual([
+        'terminal.send',
+        { terminal: 'pty-1', text: launch.command, enter: true },
+        { timeoutMs: RESUME_RPC_TIMEOUT_MS }
+      ])
+    }
+  )
+
   it('creates a fresh terminal and sends the command with Enter', async () => {
     const sendRequest = vi
       .fn()
@@ -262,10 +338,7 @@ describe('resumeAiVaultSessionInTerminal', () => {
           agentEnv: { ANTHROPIC_BASE_URL: 'http://localhost:3000' }
         },
         launchAgent: 'claude',
-        clientMutationId: 'resume-1',
-        activate: false,
-        select: true,
-        navigation: 'caller'
+        clientMutationId: 'resume-1'
       })
     ).resolves.toMatchObject({ id: 'tab-1', terminal: 'pty-1' })
     expect(sendRequest).toHaveBeenNthCalledWith(
@@ -302,6 +375,32 @@ describe('resumeAiVaultSessionInTerminal', () => {
     )
   })
 
+  it('tells the host which conversation the created pane resumes', async () => {
+    const sendRequest = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        result: { tab: { type: 'terminal', id: 'tab-1', terminal: 'pty-1', title: 'Terminal' } }
+      })
+      .mockResolvedValueOnce({ ok: true, result: { send: { accepted: true } } })
+    const launch = buildMobileAiVaultResumeLaunch({
+      session: session({ agent: 'codex', sessionId: 'codex-1' }),
+      hostPlatform: 'darwin'
+    })
+
+    await resumeAiVaultSessionInTerminal({ sendRequest }, 'worktree-1', launch)
+
+    expect(sendRequest).toHaveBeenNthCalledWith(
+      1,
+      'session.tabs.createTerminal',
+      expect.objectContaining({
+        launchAgent: 'codex',
+        resumeProviderSession: { key: 'session_id', id: 'codex-1' }
+      }),
+      { timeoutMs: RESUME_RPC_TIMEOUT_MS }
+    )
+  })
+
   it('throws when terminal creation fails', async () => {
     const sendRequest = vi.fn().mockResolvedValueOnce({
       ok: false,
@@ -316,7 +415,7 @@ describe('resumeAiVaultSessionInTerminal', () => {
     const sendRequest = vi.fn().mockResolvedValueOnce({ ok: true, result: { tab: { id: 'x' } } })
     await expect(
       resumeAiVaultSessionInTerminal({ sendRequest }, 'worktree-1', { command: 'command' })
-    ).rejects.toThrow('Created terminal response was invalid')
+    ).rejects.toThrow('The host sent a reply this app could not read (session.tabs.createTerminal)')
   })
 
   it('throws when terminal send fails or is locked', async () => {
@@ -357,11 +456,9 @@ describe('createMobileAiVaultResumeMutationRegistry', () => {
     })
 
     expect(registry.claim('session-a')).toBe('session-a:mutation-1')
-    // A failed attempt keeps the key so the host can dedup the retry.
     expect(registry.claim('session-a')).toBe('session-a:mutation-1')
 
     registry.releaseOnSuccess('session-a')
-    // A resume after success mints fresh so the user can fork intentionally.
     expect(registry.claim('session-a')).toBe('session-a:mutation-2')
   })
 
@@ -400,4 +497,20 @@ describe('resume platform helpers', () => {
     expect(resolveMobileAiVaultResumePlatform('local', 'win32', 'C:\\repo', 'linux')).toBe('linux')
     expect(resolveMobileAiVaultResumePlatform('runtime', 'linux')).toBeNull()
   })
+})
+
+it.each([null, {}, { capabilities: 'session.tabs.qoderOwnedCreate.v1' }, { capabilities: [1] }])(
+  'does not infer safe Qoder creation from unreadable host capabilities',
+  (status) => {
+    expect(readMobileAiVaultResumeHost(status).capabilities).toBeUndefined()
+  }
+)
+
+it('reads the execution platform and advertised safe-create capability together', () => {
+  expect(
+    readMobileAiVaultResumeHost({
+      hostPlatform: 'win32',
+      capabilities: ['session.tabs.qoderOwnedCreate.v1']
+    })
+  ).toEqual({ platform: 'win32', capabilities: ['session.tabs.qoderOwnedCreate.v1'] })
 })

@@ -1,14 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   createAutoSaveDelayDraftState,
   getDesktopPlatformFromUserAgent,
   getGeneralPaneSearchEntries,
   getTabOrderControlSearchKeywords,
-  shouldCommitOpenInApplicationsDraft,
   shouldShowProjectRuntimeSection,
   updateAutoSaveDelayDraftState
 } from './GeneralPane'
 import { matchesSettingsSearch } from './settings-search'
+
+vi.mock('@/store', () => ({
+  useAppStore: () => {
+    throw new Error('Pure settings helpers must not access the app store')
+  }
+}))
+
+vi.mock('@/components/terminal-pane/TerminalPane', () => ({
+  default: () => {
+    throw new Error('This suite must not render a terminal pane')
+  }
+}))
 
 describe('GeneralPane auto-save delay drafts', () => {
   it('keeps a committed draft tied to the current persisted source while settings save is pending', () => {
@@ -27,36 +38,6 @@ describe('GeneralPane auto-save delay drafts', () => {
       sourceDelayMs: 1250,
       draft: '1750'
     })
-  })
-})
-
-describe('GeneralPane open-in application drafts', () => {
-  it('does not commit rows until both label and command are present', () => {
-    expect(
-      shouldCommitOpenInApplicationsDraft([{ id: 'draft', label: 'Cursor', command: '' }])
-    ).toBe(false)
-    expect(
-      shouldCommitOpenInApplicationsDraft([{ id: 'draft', label: '', command: 'cursor' }])
-    ).toBe(false)
-    expect(
-      shouldCommitOpenInApplicationsDraft([{ id: 'draft', label: '   ', command: 'cursor' }])
-    ).toBe(false)
-    expect(
-      shouldCommitOpenInApplicationsDraft([{ id: 'draft', label: 'Cursor', command: '   ' }])
-    ).toBe(false)
-  })
-
-  it('allows commit when every draft row has a label and command', () => {
-    expect(shouldCommitOpenInApplicationsDraft([])).toBe(true)
-    expect(
-      shouldCommitOpenInApplicationsDraft([{ id: 'cursor', label: 'Cursor', command: 'cursor' }])
-    ).toBe(true)
-    expect(
-      shouldCommitOpenInApplicationsDraft([
-        { id: 'cursor', label: 'Cursor', command: 'cursor' },
-        { id: 'zed', label: 'Zed', command: 'zed' }
-      ])
-    ).toBe(true)
   })
 })
 
@@ -109,6 +90,12 @@ describe('GeneralPane search entries', () => {
     expect(matchesSettingsSearch('red underline', entries)).toBe(true)
   })
 
+  it('makes the running-terminal confirmation setting searchable', () => {
+    const entries = getGeneralPaneSearchEntries()
+
+    expect(matchesSettingsSearch('running', entries)).toBe(true)
+  })
+
   it('omits the default project runtime setting when Windows runtimes are unsupported', () => {
     const entries = getGeneralPaneSearchEntries({ includeProjectRuntime: false })
 
@@ -122,8 +109,7 @@ describe('GeneralPane project runtime section visibility', () => {
   const entries = getGeneralPaneSearchEntries()
 
   it('hides the section on non-Windows hosts even with an empty search query', () => {
-    // Regression: matchesSettingsSearch returns true for an empty query, so the
-    // platform gate is what keeps the orphaned header off macOS/Linux.
+    // Empty searches match empty entries; the platform gate must suppress orphaned non-Windows headers.
     expect(shouldShowProjectRuntimeSection(false, '', [])).toBe(false)
     expect(shouldShowProjectRuntimeSection(undefined, '', [])).toBe(false)
   })

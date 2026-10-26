@@ -1,6 +1,7 @@
 import {
   keybindingMatchesAction,
   type KeybindingInput,
+  type KeybindingActionId,
   type KeybindingMatchOptions,
   type KeybindingOverrides,
   type TerminalShortcutPolicy
@@ -28,10 +29,7 @@ export type TerminalShortcutEvent = {
   getModifierState?: (key: string) => boolean
 }
 
-// Shared close-chord predicate: the terminal pane (L3) and the floating panel's focused-terminal
-// branch (L2) both treat terminal.closePane OR a terminal-scope tab.close as "close the active
-// pane," so the two layers can't diverge. Callers pass the options each binding needs —
-// terminal.closePane is context-free; tab.close is scoped to the terminal surface.
+// Terminal L3 and floating-panel L2 share closePane/tab.close aliasing so both close the active pane under the caller’s priority policy.
 export function isTerminalPaneCloseChord(
   event: KeybindingInput,
   platform: NodeJS.Platform,
@@ -67,10 +65,15 @@ export type TerminalShortcutAction =
   | { type: 'trackNativeOptionDeadKey' }
   | { type: 'switchInputSource' }
 
-/**
- * Resolves terminal keyboard events before xterm receives them, centralizing
- * Orca shortcuts and terminal byte fallbacks in one platform-aware policy.
- */
+/** ESC CR depends on Pi’s private Kitty-query result, which panes cannot observe. Armed modifyOtherKeys uses CSI 27;mod;13~ consistently in either state (STA-7701). */
+function encodeModifyOtherKeysEnter(
+  getModifyOtherKeys: (() => number) | undefined,
+  modifier: 2 | 3
+): string | null {
+  return (getModifyOtherKeys?.() ?? 0) > 0 ? `\x1b[27;${modifier};13~` : null
+}
+
+/** Resolve platform-aware Orca shortcuts and byte fallbacks before xterm encoding. */
 export function resolveTerminalShortcutAction(
   event: TerminalShortcutEvent,
   isMac: boolean,
@@ -88,77 +91,77 @@ export function resolveTerminalShortcutAction(
   getWindowsShiftEnterEncoding?: () => WindowsShiftEnterEncoding,
   // Why: keybindings follow the client OS, but byte protocols follow the PTY host — they differ for macOS clients on Windows runtimes.
   isWindowsTerminalHost: () => boolean = () => isWindows,
-  // Why: gates the tab.close pane-close alias — under terminal-first a remapped tab.close yields to the shell (terminal.closePane, scope terminal, still closes).
+  // Why: terminal-first yields editing and TUI chords before xterm encodes them.
   terminalShortcutPolicy: TerminalShortcutPolicy = 'orca-first',
   // Why: query-only Droid/Grok consumers need CSI-u even when the live kitty flags remain inactive.
-  hasCtrlEnterCsiUAuthority?: () => boolean
+  hasCtrlEnterCsiUAuthority?: () => boolean,
+  // Why: pi arms modifyOtherKeys when its kitty query goes unanswered; see encodeModifyOtherKeysEnter.
+  getModifyOtherKeysActivePane?: () => number,
+  // Why: vim/nano treat ESC d as Escape + d, so a non-agent full-screen app keeps xterm's CSI 3;3~.
+  isActivePaneNonAgentFullScreen?: () => boolean
 ): TerminalShortcutAction | null {
   const platform: NodeJS.Platform = isMac ? 'darwin' : isWindows ? 'win32' : 'linux'
+  const matchOptions: KeybindingMatchOptions = { context: 'terminal', terminalShortcutPolicy }
+  const matches = (action: KeybindingActionId): boolean =>
+    keybindingMatchesAction(action, event, platform, keybindings, matchOptions)
 
   // Why: capture this chord even on repeat without blocking the OS default input-source switch.
-  if (keybindingMatchesAction('terminal.switchInputSource', event, platform, keybindings)) {
+  if (matches('terminal.switchInputSource')) {
     return { type: 'switchInputSource' }
   }
 
-  // Why: held select-all keydowns must remain claimed until keyup so Kitty
-  // event reporting cannot encode their repeat or release into the PTY.
-  if (keybindingMatchesAction('terminal.selectAll', event, platform, keybindings)) {
+  // Retain copy/select-all ownership through repeat and keyup so Kitty cannot leak their lifecycle into the PTY.
+  if (matches('terminal.selectAll')) {
     return { type: 'selectAll' }
   }
 
-  if (!event.repeat) {
-    if (keybindingMatchesAction('terminal.copySelection', event, platform, keybindings)) {
-      return { type: 'copySelection' }
-    }
+  if (matches('terminal.copySelection')) {
+    return { type: 'copySelection' }
+  }
 
-    if (keybindingMatchesAction('terminal.search', event, platform, keybindings)) {
+  if (!event.repeat) {
+    if (matches('terminal.search')) {
       return { type: 'toggleSearch' }
     }
 
-    if (keybindingMatchesAction('terminal.clear', event, platform, keybindings)) {
+    if (matches('terminal.clear')) {
       return { type: 'clearActivePane' }
     }
 
-    if (keybindingMatchesAction('terminal.focusPreviousPane', event, platform, keybindings)) {
+    if (matches('terminal.focusPreviousPane')) {
       return { type: 'focusPane', direction: 'previous' }
     }
 
-    if (keybindingMatchesAction('terminal.focusNextPane', event, platform, keybindings)) {
+    if (matches('terminal.focusNextPane')) {
       return { type: 'focusPane', direction: 'next' }
     }
 
-    if (keybindingMatchesAction('terminal.equalizePaneSizes', event, platform, keybindings)) {
+    if (matches('terminal.equalizePaneSizes')) {
       return { type: 'equalizePaneSizes' }
     }
 
-    if (keybindingMatchesAction('terminal.expandPane', event, platform, keybindings)) {
+    if (matches('terminal.expandPane')) {
       return { type: 'toggleExpandActivePane' }
     }
 
-    if (keybindingMatchesAction('terminal.setTitle', event, platform, keybindings)) {
+    if (matches('terminal.setTitle')) {
       return { type: 'setTitle' }
     }
 
-    if (keybindingMatchesAction('terminal.clearPaneTitle', event, platform, keybindings)) {
+    if (matches('terminal.clearPaneTitle')) {
       return { type: 'clearPaneTitle' }
     }
 
-    // Why: recognize the active tab.close binding as a pane-close alias too, so a user who remaps
-    // tab.close alone still closes the focused split pane (never the whole tab); L2 always defers to us.
-    if (
-      isTerminalPaneCloseChord(event, platform, keybindings, undefined, {
-        context: 'terminal',
-        terminalShortcutPolicy
-      })
-    ) {
+    // Treat remapped terminal-scope tab.close as pane close; floating L2 defers so splits never close the whole tab.
+    if (isTerminalPaneCloseChord(event, platform, keybindings, matchOptions, matchOptions)) {
       return { type: 'closeActivePane' }
     }
 
-    if (keybindingMatchesAction('terminal.splitRight', event, platform, keybindings)) {
+    if (matches('terminal.splitRight')) {
       return { type: 'splitActivePane', direction: 'vertical' }
     }
 
-    if (keybindingMatchesAction('terminal.splitDown', event, platform, keybindings)) {
+    if (matches('terminal.splitDown')) {
       return { type: 'splitActivePane', direction: 'horizontal' }
     }
   }
@@ -175,7 +178,28 @@ export function resolveTerminalShortcutAction(
     const hasTrustedWindowsCsiU = windowsHost && getWindowsShiftEnterEncoding?.() === 'csi-u'
     // Why: CSI-u is application input, not universal; without trusted Windows evidence, require active KKP negotiation.
     const canSendCsiU = hasTrustedWindowsCsiU || (getKittyKeyboardFlagsActivePane?.() ?? 0) > 0
-    return { type: 'sendInput', data: canSendCsiU ? '\x1b[13;2u' : '\x1b\r' }
+    if (canSendCsiU) {
+      return { type: 'sendInput', data: '\x1b[13;2u' }
+    }
+    return {
+      type: 'sendInput',
+      data: encodeModifyOtherKeysEnter(getModifyOtherKeysActivePane, 2) ?? '\x1b\r'
+    }
+  }
+
+  if (
+    !event.metaKey &&
+    !event.ctrlKey &&
+    event.altKey &&
+    !event.shiftKey &&
+    event.key === 'Enter' &&
+    (getKittyKeyboardFlagsActivePane?.() ?? 0) === 0
+  ) {
+    // Why: without modifyOtherKeys, xterm's own `ESC CR` stays the Alt+Enter encoding.
+    const data = encodeModifyOtherKeysEnter(getModifyOtherKeysActivePane, 3)
+    if (data) {
+      return { type: 'sendInput', data }
+    }
   }
 
   if (
@@ -235,13 +259,18 @@ export function resolveTerminalShortcutAction(
     !event.ctrlKey &&
     event.altKey &&
     !event.shiftKey &&
-    event.key === 'Backspace'
+    (event.key === 'Backspace' ||
+      (isMac &&
+        event.key === 'Delete' &&
+        event.code?.startsWith('Numpad') !== true &&
+        isActivePaneNonAgentFullScreen?.() !== true))
   ) {
-    // Why: a kitty-protocol TUI binds the CSI 127;3u xterm emits natively; the legacy \x1b\x7f fallback would bypass it.
+    // Why: a kitty-protocol TUI binds xterm's native CSI 127;3u / CSI 3;3~; legacy fallbacks would bypass them.
     if ((getKittyKeyboardFlagsActivePane?.() ?? 0) > 0) {
       return null
     }
-    return { type: 'sendInput', data: '\x1b\x7f' }
+    // Why: ⌥⌦ mirrors iTerm2's Natural Text Editing ESC d (#21491); Linux/Windows keep xterm's native CSI 3;3~.
+    return { type: 'sendInput', data: event.key === 'Backspace' ? '\x1b\x7f' : '\x1bd' }
   }
 
   if (

@@ -7,7 +7,7 @@ vi.mock('../native-chat/agent-session-wire/structured-agent-session-registry', (
 }))
 
 const { OrcaRuntimeWithAdoptTerminalOrphansFromInventory } =
-  await import('./orca-runtime-adopt-terminal-orphans-from-inventory')
+  await import('./terminal/adoption/adopt-terminal-orphans-from-inventory')
 const {
   mintStructuredWorkerHandle,
   mintStructuredWorkerPaneKey,
@@ -20,9 +20,16 @@ const prototype = OrcaRuntimeWithAdoptTerminalOrphansFromInventory.prototype
 const getLivePaneKey = prototype.getLiveTerminalPaneKey
 const resolveActiveTerminal = prototype.resolveActiveTerminal
 
-function installRecord(lease: { runtimeKind: string; claimStatus: string } | null): void {
+function installRecord(
+  lease: { runtimeKind: string; claimStatus: string } | null,
+  tabListed = false
+): void {
   hostRef.current = lease
     ? {
+        getPersistedVisibleSessionTabIndex: () => ({
+          present: true,
+          sessionIds: tabListed ? [SESSION_ID] : []
+        }),
         deps: {
           store: {
             getRecord: () => ({
@@ -73,16 +80,24 @@ describe('bare-handle direct mail to a structured session', () => {
     )
   })
 
-  it('withholds the pane key when the session is not proven live', () => {
-    // The PTY branch is connected-gated so mail is never routed to a corpse; so is this one.
+  it('routes to a worker at rest, whose agent the mail starts', () => {
+    // Released by the idle sweep with its chat tab still listed: owned, so mail reaches it.
     const handle = registerWorker()
-    installRecord({ runtimeKind: 'native', claimStatus: 'reserved' })
+    installRecord({ runtimeKind: 'native', claimStatus: 'released' }, true)
+    expect(getLivePaneKey.call(paneKeyStub, handle)).toBe(
+      structuredWorkerIdentities.get(handle)!.paneKey
+    )
+  })
+
+  it('withholds the pane key from a retired worker: released, with its tab gone', () => {
+    const handle = registerWorker()
+    installRecord({ runtimeKind: 'native', claimStatus: 'released' }, false)
     expect(getLivePaneKey.call(paneKeyStub, handle)).toBeNull()
   })
 
-  it('withholds the pane key when the lease moved to a terminal owner', () => {
+  it('withholds the pane key when a terminal an older build recorded holds the lease', () => {
     const handle = registerWorker()
-    installRecord({ runtimeKind: 'tui', claimStatus: 'live' })
+    installRecord({ runtimeKind: 'native', claimStatus: 'conflicted' })
     expect(getLivePaneKey.call(paneKeyStub, handle)).toBeNull()
   })
 })
@@ -108,8 +123,7 @@ describe('implicit sender resolution refuses to guess', () => {
   })
 
   it('refuses rather than picking the first of several', async () => {
-    // An arbitrary pick lets a bare `send --type worker_done` settle a SIBLING's context-only
-    // dispatch, a tier that has no capability token to reject on.
+    // An arbitrary sender guess can settle a sibling's context-only Dispatch, which has no capability token to reject it.
     await expect(
       resolveActiveTerminal.call(senderStub(['leaf_a', 'leaf_b']), 'id:wt_1', {
         requireUnambiguous: true
@@ -118,9 +132,7 @@ describe('implicit sender resolution refuses to guess', () => {
   })
 
   it('refuses the same arbitrary pick before the terminal graph is ready', async () => {
-    // The snapshot carries a focused terminal on purpose: without it the refusal below would come
-    // from the ambiguous `listTerminals` fallback alone and would still hold with the pre-ready
-    // focus guess left in, proving nothing about it.
+    // Keep a focused terminal in the starting graph so only the pre-ready identity guard can refuse this request.
     const preReady = {
       graphStatus: 'starting',
       resolveWorktreeSelector: async () => ({ id: 'wt_1' }),

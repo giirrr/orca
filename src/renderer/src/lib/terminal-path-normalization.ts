@@ -108,8 +108,7 @@ export function resolveTildePath(
     return null
   }
 
-  // Why: remote/devcontainer terminals can have cwd outside the user's home;
-  // prefer the terminal's explicit home when the caller has it.
+  // Prefer explicit terminal home; remote/devcontainer cwd need not sit under the user’s home.
   const resolvedHomePath = normalizeExplicitHomePath(homePath) ?? inferHomePathFromCwd(cwd)
   if (!resolvedHomePath) {
     return null
@@ -124,23 +123,8 @@ export function joinAbsolutePath(basePath: string, relativePath: string): string
     return null
   }
 
-  return normalizeJoinedPath(normalizedBase, relativePath)
-}
-
-function normalizeJoinedPath(basePath: NormalizedAbsolutePath, relativePath: string): string {
-  const normalizedBaseSegments = normalizeSegments(basePath.normalized)
-  const relativeSegments = normalizeSegments(relativePath)
-  const joinedSegments = [...normalizedBaseSegments, ...relativeSegments]
-
-  if (basePath.rootKind === 'unc') {
-    const [server, share, ...rest] = joinedSegments
-    return rest.length > 0 ? `//${server}/${share}/${rest.join('/')}` : `//${server}/${share}`
-  }
-
-  if (basePath.rootKind === 'windows') {
-    const [drive, ...rest] = joinedSegments
-    return rest.length > 0 ? `${drive}/${rest.join('/')}` : drive
-  }
-
-  return `/${joinedSegments.join('/')}`.replace(/\/+$/, '') || '/'
+  const base = normalizedBase.normalized.replace(/\/$/, '')
+  const suffix = relativePath.replace(/^[\\/]+/, '')
+  // Resolve parent segments against the base while its drive or UNC share remains the root.
+  return normalizeAbsolutePath(`${base}/${suffix}`)?.normalized ?? null
 }

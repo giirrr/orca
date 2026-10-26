@@ -142,3 +142,10 @@ export function removeDeliveredMobileDiffComments(
     return !snapshot || !deliveredCommentMatches(comment, snapshot)
   })
 }
+
+export function sendableMobileDiffComments(
+  comments: readonly DiffComment[],
+  sendingIds: ReadonlySet<string>
+): DiffComment[] {
+  return comments.filter((comment) => !comment.sentAt && !sendingIds.has(comment.id))
+}

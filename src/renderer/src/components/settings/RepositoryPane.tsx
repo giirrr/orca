@@ -1,44 +1,46 @@
+import type { GhAccountBinding } from '../../../../shared/github/account-binding'
 import { useCallback, useRef, useState } from 'react'
 import type { OrcaHooks, RepoHookSettings } from '../../../../shared/orca-yaml-hook-types'
 import type { Project, ProjectUpdateArgs } from '../../../../shared/project-types'
 import type { Repo } from '../../../../shared/repo-types'
 import { getRepoKindLabel, isFolderRepo } from '../../../../shared/repo-kind'
 import { getRepoExecutionHostId, type ExecutionHostId } from '../../../../shared/execution-host'
-import { Button } from '../ui/button'
 import { Label } from '../ui/label'
 import { Separator } from '../ui/separator'
-import { Trash2 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
-import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
-import { RepositoryHooksSection } from './RepositoryHooksSection'
+import { RepositoryHooksSection } from './repository/execution/RepositoryHooksSection'
 import { McpConfigSection } from './McpConfigSection'
 import { WorktreeSymlinksSection } from './WorktreeSymlinksSection'
 import { SparsePresetSettingsSection } from './SparsePresetSettingsSection'
 import { RepositorySourceControlAiSection } from './RepositorySourceControlAiSection'
 import { SearchableSetting } from './SearchableSetting'
+import { RepositoryRemoveProjectButton } from './RepositoryRemoveProjectButton'
+import type { SettingsProjectRemovalScope } from './settings-project-list'
 import { matchesSettingsSearch } from './settings-search'
-import { useAppStore } from '../../store'
+import { useAppStore } from '@/store/index'
 import { getRepositoryIconSectionId } from './repository-settings-targets'
-import { RepositoryIconPicker } from './RepositoryIconPicker'
+import { RepositoryIconPicker } from './repository/identity/RepositoryIconPicker'
 import { getRepositoryPaneSearchEntries } from './repository-search'
-import { RepositoryHostSetupsSection } from './RepositoryHostSetupsSection'
-import { RepoSettingsDraftInput } from './RepositorySettingsDraftInput'
-import { RepositoryForkSyncSection } from './RepositoryForkSyncSection'
+import { RepositoryHostSetupsSection } from './repository/execution/RepositoryHostSetupsSection'
+import { RepoSettingsDraftInput } from './repository/RepositorySettingsDraftInput'
+import { RepositoryForkSyncSection } from './repository/identity/RepositoryForkSyncSection'
+import { RepositoryGitHubAccountSection } from './RepositoryGitHubAccountSection'
 import { translate } from '@/i18n/i18n'
-import { RepositoryWindowsRuntimeSection } from './RepositoryWindowsRuntimeSection'
-import { matchesRepositoryIdentitySearch } from './repository-identity-search'
-import { RepositoryWorktreeDefaultsSection } from './RepositoryWorktreeDefaultsSection'
-import { getProjectRuntimeSessionSummary } from './repository-runtime-session-summary'
+import { RepositoryWindowsRuntimeSection } from './repository/execution/RepositoryWindowsRuntimeSection'
+import { matchesRepositoryIdentitySearch } from './repository/identity/repository-identity-search'
+import { RepositoryWorktreeDefaultsSection } from './repository/execution/RepositoryWorktreeDefaultsSection'
+import { RepositoryJiraProjectSection } from './repository/RepositoryJiraProjectSection'
+import { getProjectRuntimeSessionSummary } from './repository/execution/repository-runtime-session-summary'
 import { getRepoOwnerWorktreeVisibilityDefaults } from '../../store/worktree-visibility-defaults-by-host'
 export { getRepositoryPaneSearchEntries }
-export { matchesRepositoryIdentitySearch } from './repository-identity-search'
 
 type RepositoryPaneRepoUpdate = Omit<
   Partial<Repo>,
-  'sourceControlAi' | 'externalWorktreeVisibility'
+  'sourceControlAi' | 'externalWorktreeVisibility' | 'ghAccount'
 > & {
   sourceControlAi?: Repo['sourceControlAi'] | null
   externalWorktreeVisibility?: Repo['externalWorktreeVisibility'] | null
+  ghAccount?: GhAccountBinding | null
 }
 
 const EMPTY_WSL_DISTROS: string[] = []
@@ -57,6 +59,9 @@ type RepositoryPaneProps = {
   removeProject: (repoId: string) => void
   project?: Project | null
   selectedProjectSetupId?: string
+  settingsSelectionKey?: string
+  settingsEntryRepoIds?: ReadonlySet<string>
+  removalScope?: SettingsProjectRemovalScope
   isLocalWindowsProject?: boolean
   wslAvailable?: boolean
   wslDistros?: string[]
@@ -77,6 +82,9 @@ export function RepositoryPane({
   removeProject,
   project = null,
   selectedProjectSetupId,
+  settingsSelectionKey,
+  settingsEntryRepoIds,
+  removalScope = 'project',
   isLocalWindowsProject = false,
   wslAvailable = false,
   wslDistros = EMPTY_WSL_DISTROS,
@@ -84,10 +92,7 @@ export function RepositoryPane({
   updateProject
 }: RepositoryPaneProps): React.JSX.Element {
   const isFolder = isFolderRepo(repo)
-  // Why: this pane renders the switcher-selected host's repo row. Bind every
-  // edit to that host so identity/host-specific writes land on the selected
-  // host, not findRepoForHost's focused-host fallback (the same-id/self-pair
-  // case where local and a runtime share one repo id).
+  // Bind writes to the switcher-selected owner; same-ID/self-paired repos must not use focused-host fallback.
   const selectedHostId = getRepoExecutionHostId(repo)
   const updateSelectedRepo = useCallback(
     (repoId: string, updates: RepositoryPaneRepoUpdate) =>
@@ -113,14 +118,11 @@ export function RepositoryPane({
   const runtimeSessionSummary = useAppStore(
     useShallow((state) => getProjectRuntimeSessionSummary(state, repo.id))
   )
-  const [confirmingRemove, setConfirmingRemove] = useState<string | null>(null)
   const [copiedTemplate, setCopiedTemplate] = useState(false)
   const copiedTemplateResetTimerRef = useRef<number | null>(null)
-  // Why: clipboard IPC can resolve after settings navigation; avoid starting
-  // a reset timer that will outlive this pane.
+  // Clipboard IPC may outlive navigation; do not start timers after pane detach.
   const isMountedRef = useRef(false)
-  // Why: searching a project name is navigation to that project, not a
-  // request to hide every child row that does not repeat the project name.
+  // Project-name search navigates to the project; it must not hide child controls that omit the name.
   const forceFullPaneForRepoMatch = matchesRepositoryIdentitySearch(searchQuery, repo)
 
   const clearCopiedTemplateResetTimer = useCallback((): void => {
@@ -140,16 +142,6 @@ export function RepositoryPane({
     [clearCopiedTemplateResetTimer]
   )
 
-  const handleRemoveProject = (repoId: string) => {
-    if (confirmingRemove === repoId) {
-      removeProject(repoId)
-      setConfirmingRemove(null)
-      return
-    }
-
-    setConfirmingRemove(repoId)
-  }
-
   const updateSelectedRepoHookSettings = (nextSettings: RepoHookSettings) => {
     updateSelectedRepo(repo.id, {
       hookSettings: nextSettings
@@ -157,8 +149,7 @@ export function RepositoryPane({
   }
 
   const handleCopyTemplate = async () => {
-    // Why: the missing-`orca.yaml` state is a migration aid, so copying the shared-template
-    // snippet should be one click rather than forcing users to reconstruct the expected shape.
+    // Make missing-orca.yaml migration a one-click copy of the expected shared-template shape.
     await window.api.ui.writeClipboardText(`scripts:
   setup: |
     pnpm worktree:setup
@@ -179,6 +170,8 @@ export function RepositoryPane({
   const identityEntryTitles = new Set([
     translate('auto.components.settings.repository.search.7e1e456a95', 'Display Name'),
     translate('auto.components.settings.repository.search.b24f00294a', 'Project Icon'),
+    translate('components.RepositoryJiraProjectSection.title', 'Default Jira project'),
+    translate('auto.components.settings.repository.search.githubAccount', 'GitHub Account'),
     translate(
       'auto.components.settings.repository.search.keepForkUpToDate',
       'Keep Fork Up to Date'
@@ -207,8 +200,6 @@ export function RepositoryPane({
   const sourceControlAiEntries = allEntries.filter((entry) => entry.title === 'Git AI Author')
   const hostSetupEntries = allEntries.filter((entry) => entry.title === 'Available Hosts')
   const projectRuntimeEntries = allEntries.filter((entry) => entry.title === 'Project Runtime')
-  const removeProjectLabel =
-    confirmingRemove === repo.id ? 'Confirm Remove Project' : 'Remove Project'
 
   const hooksSection =
     !isFolder && (forceFullPaneForRepoMatch || matchesSettingsSearch(searchQuery, hooksEntries)) ? (
@@ -226,9 +217,7 @@ export function RepositoryPane({
       />
     ) : null
 
-  // Why: Identity (name, icon, base ref) stays at the top so it's the first
-  // thing a user sees. Setup commands follow immediately because they're the
-  // most-edited surface and should beat MCP/symlinks/sparse-presets.
+  // Lead with identity, then frequently edited setup commands, before secondary repository controls.
   const visibleSections = [
     forceFullPaneForRepoMatch || matchesSettingsSearch(searchQuery, identityEntries) ? (
       <section key="identity" className="relative space-y-8">
@@ -256,37 +245,12 @@ export function RepositoryPane({
               </p>
             ) : null}
           </div>
-          <SearchableSetting
-            title={translate(
-              'auto.components.settings.RepositoryPane.0909e5d650',
-              'Remove Project'
-            )}
-            description={translate(
-              'auto.components.settings.RepositoryPane.removeProjectAllHosts',
-              'Remove this project from Orca on all configured hosts.'
-            )}
-            keywords={[repo.displayName, 'delete', 'project', 'repository']}
-            className="absolute top-0 right-0 z-10 w-auto max-w-none"
+          <RepositoryRemoveProjectButton
+            repo={repo}
+            removalScope={removalScope}
             forceVisible={forceFullPaneForRepoMatch}
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant={confirmingRemove === repo.id ? 'destructive' : 'outline'}
-                  size="icon-sm"
-                  onClick={() => handleRemoveProject(repo.id)}
-                  onBlur={() => setConfirmingRemove(null)}
-                  aria-label={removeProjectLabel}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" sideOffset={4}>
-                {removeProjectLabel}
-              </TooltipContent>
-            </Tooltip>
-          </SearchableSetting>
+            removeProject={removeProject}
+          />
         </div>
 
         <SearchableSetting
@@ -334,11 +298,20 @@ export function RepositoryPane({
           <RepositoryIconPicker repo={repo} updateRepo={updateSelectedRepo} />
         </SearchableSetting>
 
+        <RepositoryJiraProjectSection
+          key={`${selectedHostId}:${repo.id}`}
+          repo={repo}
+          updateRepo={updateSelectedRepo}
+          forceVisible={forceFullPaneForRepoMatch}
+        />
+
         {!isFolder ? (
           <>
             <RepositoryHostSetupsSection
               repo={repo}
               selectedProjectSetupId={selectedProjectSetupId}
+              settingsSelectionKey={settingsSelectionKey}
+              settingsEntryRepoIds={settingsEntryRepoIds}
               forceVisible={forceFullPaneForRepoMatch}
               searchQuery={searchQuery}
               searchEntries={hostSetupEntries}
@@ -360,6 +333,12 @@ export function RepositoryPane({
             />
 
             <RepositoryForkSyncSection
+              repo={repo}
+              updateRepo={updateSelectedRepo}
+              forceVisible={forceFullPaneForRepoMatch}
+            />
+
+            <RepositoryGitHubAccountSection
               repo={repo}
               updateRepo={updateSelectedRepo}
               forceVisible={forceFullPaneForRepoMatch}
@@ -397,10 +376,10 @@ export function RepositoryPane({
     ) : null,
     !isFolder &&
     (forceFullPaneForRepoMatch || matchesSettingsSearch(searchQuery, sparsePresetEntries)) ? (
-      <SparsePresetSettingsSection key="sparse-presets" repoId={repo.id} />
+      <SparsePresetSettingsSection key={`sparse-presets:${repo.id}`} repoId={repo.id} />
     ) : null,
     !isFolder && (forceFullPaneForRepoMatch || matchesSettingsSearch(searchQuery, mcpEntries)) ? (
-      <McpConfigSection key="mcp-configs" repo={repo} />
+      <McpConfigSection key={`mcp-configs:${selectedHostId}:${repo.id}`} repo={repo} />
     ) : null
   ].filter(Boolean)
 

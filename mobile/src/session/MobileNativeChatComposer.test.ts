@@ -1,9 +1,10 @@
-import { createElement, StrictMode, type ComponentProps } from 'react'
-import { act, create, type ReactTestRenderer } from 'react-test-renderer'
-import { Keyboard } from 'react-native'
+import { createElement, createRef, StrictMode, type ComponentProps, type ReactNode } from 'react'
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer'
+import { Keyboard, type TextInput } from 'react-native'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { radii, spacing } from '../theme/mobile-theme'
 import { MobileNativeChatComposer as NativeChatComposer } from './MobileNativeChatComposer'
+import { findAllByHostType, findByHostType } from '../test-support/react-test-renderer-host-nodes'
 
 const getNoComposerEditGeneration = () => 0
 
@@ -19,11 +20,13 @@ function MobileNativeChatComposer({
 vi.mock('react-native', async () => {
   const React = await import('react')
   return {
+    AccessibilityInfo: { announceForAccessibilityWithOptions: vi.fn() },
     ActivityIndicator: 'ActivityIndicator',
     Image: 'Image',
     Keyboard: { dismiss: vi.fn() },
+    Platform: { OS: 'ios' },
     Pressable: 'Pressable',
-    ScrollView: ({ children, ...props }: { children?: unknown }) =>
+    ScrollView: ({ children, ...props }: { children?: ReactNode }) =>
       React.createElement('ScrollView', props, children),
     StyleSheet: {
       create: (styles: unknown) => styles,
@@ -41,19 +44,20 @@ vi.mock('lucide-react-native', () => ({
   ChevronDown: 'ChevronDown',
   ChevronLeft: 'ChevronLeft',
   ChevronRight: 'ChevronRight',
-  ImagePlus: 'ImagePlus',
+  FileText: 'FileText',
   Mic: 'Mic',
+  Package: 'Package',
+  Plus: 'Plus',
+  ShieldAlert: 'ShieldAlert',
   Square: 'Square',
+  Terminal: 'Terminal',
   X: 'X'
 }))
 
-vi.mock('../components/BottomDrawer', async () => {
-  const React = await import('react')
-  return {
-    BottomDrawer: ({ visible, children }: { visible: boolean; children?: unknown }) =>
-      visible ? React.createElement('BottomDrawer', { visible }, children) : null
-  }
-})
+vi.mock('../components/mounted-bottom-drawer', () => ({ MountedBottomDrawer: 'BottomDrawer' }))
+vi.mock('../components/bottom-drawer-modal-host-scope', () => ({
+  useBottomDrawerModalHost: () => null
+}))
 
 describe('MobileNativeChatComposer', () => {
   let renderer: ReactTestRenderer | null = null
@@ -90,13 +94,14 @@ describe('MobileNativeChatComposer', () => {
     })
   }
 
-  function sendButton(): { props: { onPress: () => Promise<void> } } {
+  function sendButton(): ReactTestInstance {
     if (!renderer) {
       throw new Error('Composer was not rendered')
     }
     return renderer.root.find(
-      (node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Send message'
-    ) as { props: { onPress: () => Promise<void> } }
+      (node) =>
+        String(node.type) === 'Pressable' && node.props.accessibilityLabel === 'Send message'
+    )
   }
 
   it('reports an accepted send without owning route-scoped draft cleanup', async () => {
@@ -106,8 +111,7 @@ describe('MobileNativeChatComposer', () => {
 
     await act(async () => sendButton().props.onPress())
 
-    // Verbatim: the send seam trims for the wire, so a rejected send can hand
-    // back the draft byte-for-byte (#14819).
+    // The send seam trims; preserve raw draft bytes when send rejects.
     expect(onSend).toHaveBeenCalledWith(' hello ')
     expect(onChangeText).not.toHaveBeenCalled()
   })
@@ -118,18 +122,10 @@ describe('MobileNativeChatComposer', () => {
     const composer = renderer!.root.findByProps({ testID: 'native-chat-composer' })
     const inset = renderer!.root.findByProps({ testID: 'native-chat-composer-inset' })
     const actions = renderer!.root.findByProps({ testID: 'native-chat-composer-actions' })
-    expect(composer.findAllByType('TextInput')).toHaveLength(1)
-    expect(composer.children[1]).toBe(actions)
-    expect(inset.props.style).toMatchObject({
-      paddingHorizontal: spacing.md,
-      paddingTop: spacing.sm,
-      paddingBottom: spacing.md
-    })
-    expect(composer.props.style).toMatchObject({
-      borderWidth: 1,
-      borderRadius: radii.card,
-      overflow: 'hidden'
-    })
+    expect(findAllByHostType(composer, 'TextInput')).toHaveLength(1)
+    expect(composer.children.at(-1)).toBe(actions)
+    expect(inset.props.style).toMatchObject({ paddingBottom: spacing.sm })
+    expect(composer.props.style).toMatchObject({ borderWidth: 1, borderRadius: radii.composer })
   })
 
   it('preserves leading whitespace so prose is not turned into a slash command', async () => {
@@ -149,10 +145,8 @@ describe('MobileNativeChatComposer', () => {
     expect(onSend).toHaveBeenCalledWith(' /clear is prose ')
   })
 
-  it('locks the option pickers while a composer send is in flight', async () => {
-    // The reverse of the test below. The host spaces a send's body and its Enter
-    // ~500ms apart, so an apply tapped inside that window would be submitted as
-    // part of the user's prompt instead of running as its own command.
+  it('locks pickers during a pending send while keeping Stop and the next draft usable', async () => {
+    // Apply during the host’s body/Enter delay would become part of the prompt.
     let releaseSend: ((accepted: boolean) => void) | undefined
     const onSend = vi.fn(
       () =>
@@ -174,6 +168,7 @@ describe('MobileNativeChatComposer', () => {
             ]
           },
           valueSource: 'unknown' as const,
+          transport: 'catalog' as const,
           settable: true
         }
       ],
@@ -182,36 +177,47 @@ describe('MobileNativeChatComposer', () => {
       invokeAction: vi.fn(),
       recordCommand: vi.fn()
     }
+    const onStop = vi.fn()
+    const draw = (value: string) =>
+      createElement(MobileNativeChatComposer, {
+        value,
+        onChangeText: vi.fn(),
+        onSend,
+        sendSurfaceId: 'tab-a',
+        getSendCompletionGeneration: getCurrentSendCompletionGeneration,
+        sessionOptions: { isWorking: false, controller },
+        stop: { onStop, held: false }
+      })
     await act(async () => {
-      renderer = create(
-        createElement(MobileNativeChatComposer, {
-          value: 'run the tests',
-          onChangeText: vi.fn(),
-          onSend,
-          sendSurfaceId: 'tab-a',
-          getSendCompletionGeneration: getCurrentSendCompletionGeneration,
-          sessionOptions: { isWorking: false, controller }
-        })
-      )
+      renderer = create(draw('run the tests'))
     })
-    const modelPill = (): { props: { accessibilityState: { disabled: boolean } } } =>
+    const modelPill = () =>
       renderer!.root.find(
-        (node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Model, Model'
-      ) as { props: { accessibilityState: { disabled: boolean } } }
+        (node) =>
+          String(node.type) === 'Pressable' && node.props.accessibilityLabel === 'Model, Model'
+      )
     expect(modelPill().props.accessibilityState).toMatchObject({ disabled: false })
-    // Start the send but don't await it — it stays in flight on purpose.
     let pressed!: Promise<void>
     await act(async () => {
       pressed = sendButton().props.onPress()
       await Promise.resolve()
     })
     expect(onSend).toHaveBeenCalled()
+    await act(async () => renderer!.update(draw('')))
+    await act(async () => renderer!.update(draw('next draft')))
+    await act(async () =>
+      renderer!.root.findByProps({ accessibilityLabel: 'Stop the agent' }).props.onPress()
+    )
+    expect(onStop).toHaveBeenCalledTimes(1)
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(findByHostType(renderer!.root, 'TextInput').props.value).toBe('next draft')
     expect(modelPill().props.accessibilityState).toMatchObject({ disabled: true })
     await act(async () => {
       releaseSend?.(true)
       await pressed
     })
     expect(modelPill().props.accessibilityState).toMatchObject({ disabled: false })
+    expect(sendButton().props.disabled).toBe(false)
   })
 
   it('blocks composer submission while a session-option command is pending', async () => {
@@ -262,26 +268,165 @@ describe('MobileNativeChatComposer', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('keeps the text input editable while the send is locked', async () => {
+  it('retains an editable draft through a send lock and can send it after unlocking', async () => {
+    const onSend = vi.fn().mockResolvedValue(true)
+    const onChangeText = vi.fn()
+    vi.mocked(Keyboard.dismiss).mockClear()
+    const draw = (disabled: boolean, value = 'half-typed') =>
+      createElement(MobileNativeChatComposer, {
+        value,
+        onChangeText,
+        onSend,
+        sendSurfaceId: 'tab-a',
+        getSendCompletionGeneration: getCurrentSendCompletionGeneration,
+        disabled
+      })
+    await act(async () => {
+      renderer = create(draw(false))
+    })
+    const input = () => findByHostType(renderer!.root, 'TextInput')
+    const originalInput = input()
+    await act(async () => input().props.onFocus())
+    await act(async () => renderer!.update(draw(true)))
+    // Do not revoke editable: iOS resigns first responder and closes the keyboard.
+    expect(input()).toBe(originalInput)
+    expect(input().props.editable).not.toBe(false)
+    expect(sendButton().props).toMatchObject({ disabled: true })
+    await act(async () => sendButton().props.onPress())
+    expect(onSend).not.toHaveBeenCalled()
+    expect(onChangeText).not.toHaveBeenCalled()
+    expect(input().props.value).toBe('half-typed')
+    expect(Keyboard.dismiss).not.toHaveBeenCalled()
+
+    await act(async () => input().props.onChangeText('finished draft'))
+    expect(onChangeText).toHaveBeenCalledWith('finished draft')
+    await act(async () => renderer!.update(draw(true, 'finished draft')))
+    expect(input().props.value).toBe('finished draft')
+    await act(async () => renderer!.update(draw(false, 'finished draft')))
+    expect(input()).toBe(originalInput)
+    expect(sendButton().props).toMatchObject({ disabled: false })
+    await act(async () => sendButton().props.onPress())
+    expect(onSend).toHaveBeenCalledExactlyOnceWith('finished draft')
+  })
+
+  it('hands its owner the text field, so Edit can focus it', async () => {
+    const focus = vi.fn()
+    const inputRef = createRef<TextInput>()
     await act(async () => {
       renderer = create(
         createElement(MobileNativeChatComposer, {
-          value: 'half-typed',
+          inputRef,
+          value: '',
           onChangeText: vi.fn(),
           onSend: vi.fn().mockResolvedValue(true),
           sendSurfaceId: 'tab-a',
-          getSendCompletionGeneration: getCurrentSendCompletionGeneration,
-          disabled: true
-        })
+          getSendCompletionGeneration: getCurrentSendCompletionGeneration
+        }),
+        { createNodeMock: (element) => (element.type === 'TextInput' ? { focus } : null) }
       )
     })
-    // Revoking `editable` on a focused field resigns first responder on iOS and
-    // yanks the keyboard mid-typing (#10681) — the lock may only gate sending.
-    const input = renderer!.root.find((node) => node.type === 'TextInput') as {
-      props: { editable?: boolean }
+    inputRef.current?.focus()
+    expect(focus).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps one shape focused or not, and puts Stop in Send’s slot only while nothing is typed', async () => {
+    let fieldMounts = 0
+    const props = {
+      onChangeText: vi.fn(),
+      onSend: vi.fn().mockResolvedValue(true),
+      onAttachImage: vi.fn(),
+      onMicPress: vi.fn(),
+      sendSurfaceId: 'tab-a',
+      getSendCompletionGeneration: getCurrentSendCompletionGeneration,
+      stop: { onStop: vi.fn(), held: false }
     }
-    expect(input.props.editable).not.toBe(false)
-    expect(sendButton().props).toMatchObject({ disabled: true })
+    const draw = (value: string, sendDisabled = false) =>
+      createElement(MobileNativeChatComposer, { ...props, value, sendDisabled })
+    await act(async () => {
+      renderer = create(draw(''), {
+        createNodeMock: (element) => {
+          fieldMounts += element.type === 'TextInput' ? 1 : 0
+          return {}
+        }
+      })
+    })
+    const bar = () => renderer!.root.findByProps({ testID: 'native-chat-composer' })
+    const labelled = (label: string) => renderer!.root.findAllByProps({ accessibilityLabel: label })
+    const field = () => findByHostType(renderer!.root, 'TextInput')
+    const unfocused = bar().props.style
+    expect(labelled('Stop the agent')).toHaveLength(1)
+    expect(labelled('Send message')).toHaveLength(0)
+
+    await act(async () => field().props.onFocus())
+    expect(bar().props.style).toBe(unfocused)
+    await act(async () => field().props.onBlur())
+
+    await act(async () => renderer!.update(draw('queue this')))
+    expect(bar().props.style).toBe(unfocused)
+    expect(labelled('Send message')).toHaveLength(1)
+    await act(async () => renderer!.update(draw('queue this', true)))
+    expect(labelled('Stop the agent')).toHaveLength(1)
+    expect(fieldMounts).toBe(1)
+  })
+
+  it('holds each picker through dismissal and restores only pill-displaced focus', async () => {
+    const focus = vi.fn()
+    const controller = {
+      snapshot: ['model', 'effort'].map((id) => ({
+        id,
+        label: id,
+        category: id === 'model' ? ('model' as const) : ('thought_level' as const),
+        kind: { type: 'select' as const, choices: [] },
+        valueSource: 'unknown' as const,
+        transport: 'catalog' as const,
+        settable: true
+      })),
+      pendingId: null,
+      setOption: vi.fn(),
+      invokeAction: vi.fn(),
+      recordCommand: vi.fn(),
+      optionPickerRequest: { id: 'model', sequence: 0 }
+    }
+    const draw = () =>
+      createElement(MobileNativeChatComposer, {
+        value: '',
+        onChangeText: vi.fn(),
+        onSend: vi.fn().mockResolvedValue(true),
+        sendSurfaceId: 'tab-a',
+        getSendCompletionGeneration: getCurrentSendCompletionGeneration,
+        sessionOptions: { controller, isWorking: false }
+      })
+    await act(async () => {
+      renderer = create(draw(), {
+        createNodeMock: (element) => (element.type === 'TextInput' ? { focus } : null)
+      })
+    })
+    const field = () => findByHostType(renderer!.root, 'TextInput')
+    const press = async (label: string) =>
+      act(async () => renderer!.root.findByProps({ accessibilityLabel: label }).props.onPress())
+    expect(findAllByHostType(renderer!.root, 'BottomDrawer')).toHaveLength(0)
+    await act(async () => field().props.onFocus())
+    await press('Model, Model effort')
+    await act(async () => field().props.onBlur())
+    await press('effort, Not set')
+    await press('Back to models')
+    await press('Close picker')
+    await act(async () => findByHostType(renderer!.root, 'BottomDrawer').props.onHidden())
+    expect(focus).toHaveBeenCalledTimes(1)
+    for (const id of ['model', 'effort']) {
+      await act(async () => field().props.onFocus())
+      controller.optionPickerRequest = { id, sequence: controller.optionPickerRequest.sequence + 1 }
+      await act(async () => renderer!.update(draw()))
+      await act(async () => field().props.onBlur())
+      await act(async () => findByHostType(renderer!.root, 'BottomDrawer').props.onClose())
+      await act(async () => findByHostType(renderer!.root, 'BottomDrawer').props.onHidden())
+      expect(focus).toHaveBeenCalledTimes(1)
+    }
+    await act(async () => renderer!.unmount())
+    await act(async () => {
+      renderer = create(draw())
+    })
+    expect(findAllByHostType(renderer!.root, 'BottomDrawer')).toHaveLength(0)
   })
 
   it('renders a removable thumbnail for each pending image attachment', async () => {
@@ -302,14 +447,12 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    const thumbs = renderer!.root.findAll((node) => node.type === 'Image') as Array<{
-      props: { source: { uri: string } }
-    }>
+    const thumbs = findAllByHostType(renderer!.root, 'Image')
     expect(thumbs.map((t) => t.props.source.uri)).toEqual(['file:///a.png', 'file:///b.png'])
 
-    const remove = renderer!.root.findAll(
-      (node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Remove image'
-    ) as Array<{ props: { onPress: () => void } }>
+    const remove = findAllByHostType(renderer!.root, 'Pressable').filter(
+      (node) => node.props.accessibilityLabel === 'Remove image'
+    )
     remove[1].props.onPress()
     expect(onRemoveAttachment).toHaveBeenCalledWith('img-2')
   })
@@ -347,27 +490,17 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    const input = () =>
-      renderer!.root.find((node) => node.type === 'TextInput') as {
-        props: {
-          selection?: { start: number; end: number }
-          onSelectionChange: (e: { nativeEvent: { selection: { end: number } } }) => void
-        }
-      }
-    // Uncontrolled selection until a suggestion is applied.
+    const input = () => findByHostType(renderer!.root, 'TextInput')
     expect(input().props.selection).toBeUndefined()
-    // Place the caret at the end so the slash trigger is active and suggestions render.
     await act(async () =>
       input().props.onSelectionChange({ nativeEvent: { selection: { end: 2 } } })
     )
-    const firstSuggestion = renderer!.root.findAll(
-      (node) => node.type === 'Pressable' && !node.props.accessibilityLabel
-    )[0] as { props: { onPress: () => void } }
-    await act(async () => firstSuggestion.props.onPress())
+    const clear = renderer!.root.find(
+      (node) => node.props.accessibilityLabel === '/clear' && node.props.onPress !== undefined
+    )
+    await act(async () => clear.props.onPress())
     expect(onChangeText).toHaveBeenCalledWith('/clear ')
-    // `/clear ` is 7 chars — the caret jumps just past the inserted command + space.
     expect(input().props.selection).toEqual({ start: 7, end: 7 })
-    // The next native selection event releases control so manual placement still works.
     await act(async () =>
       input().props.onSelectionChange({ nativeEvent: { selection: { end: 7 } } })
     )
@@ -387,15 +520,9 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    const input = renderer!.root.find((node) => node.type === 'TextInput') as {
-      props: { onSelectionChange: (e: { nativeEvent: { selection: { end: number } } }) => void }
-    }
+    const input = findByHostType(renderer!.root, 'TextInput')
     await act(async () => input.props.onSelectionChange({ nativeEvent: { selection: { end: 1 } } }))
-    const texts = renderer!.root
-      .findAll((node) => node.type === 'Text')
-      .map((node) => (node.props as { children?: unknown }).children)
-    // Codex-only commands from the shared catalog, with their description rows —
-    // and none of the old hardcoded provider-agnostic list's phantom entries.
+    const texts = findAllByHostType(renderer!.root, 'Text').map((node) => node.props.children)
     expect(texts).toContain('/permissions')
     expect(texts).toContain('Choose what Codex is allowed to do')
     expect(texts).not.toContain('/cost')
@@ -407,8 +534,8 @@ describe('MobileNativeChatComposer', () => {
     const onMicPressOut = vi.fn()
     const mic = () =>
       renderer!.root.find(
-        (node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Dictate'
-      ) as { props: { onPress?: unknown; onPressIn?: unknown; onPressOut?: unknown } }
+        (node) => String(node.type) === 'Pressable' && node.props.accessibilityLabel === 'Dictate'
+      )
 
     await act(async () => {
       renderer = create(
@@ -425,7 +552,6 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    // Hold mode is walkie-talkie: press-in/out drive dictation, tap is inert.
     expect(mic().props.onPress).toBeUndefined()
     expect(mic().props.onPressIn).toBe(onMicPressIn)
     expect(mic().props.onPressOut).toBe(onMicPressOut)
@@ -445,14 +571,12 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    // Toggle mode: tap drives dictation, press-in/out inert.
     expect(mic().props.onPress).toBe(onMicPress)
     expect(mic().props.onPressIn).toBeUndefined()
     expect(mic().props.onPressOut).toBeUndefined()
   })
 
   it('dismisses the keyboard once a send is accepted', async () => {
-    // Why: the reply the user is now waiting on sits behind the keyboard.
     vi.mocked(Keyboard.dismiss).mockClear()
     await render(vi.fn().mockResolvedValue(true), vi.fn())
 
@@ -485,8 +609,7 @@ describe('MobileNativeChatComposer', () => {
   })
 
   it('keeps the keyboard up when the send is rejected', async () => {
-    // A rejected send hands the draft back for editing, so yanking the keyboard
-    // would make the user re-open it to fix and retry.
+    // Keep the keyboard after rejection so the draft can be corrected and retried.
     vi.mocked(Keyboard.dismiss).mockClear()
     await render(vi.fn().mockResolvedValue(false), vi.fn())
 
@@ -546,9 +669,7 @@ describe('MobileNativeChatComposer', () => {
       pendingSend = sendButton().props.onPress()
       await Promise.resolve()
     })
-    const input = renderer!.root.find((node) => node.type === 'TextInput') as {
-      props: { onChangeText: (text: string) => void }
-    }
+    const input = findByHostType(renderer!.root, 'TextInput')
     await act(async () => input.props.onChangeText('newer draft'))
     await act(async () => {
       resolveSend?.(true)
@@ -583,9 +704,7 @@ describe('MobileNativeChatComposer', () => {
         })
       )
     })
-    const input = renderer!.root.find((node) => node.type === 'TextInput') as {
-      props: { onSelectionChange: (event: { nativeEvent: { selection: { end: number } } }) => void }
-    }
+    const input = findByHostType(renderer!.root, 'TextInput')
     await act(async () => input.props.onSelectionChange({ nativeEvent: { selection: { end: 2 } } }))
 
     let pendingSend!: Promise<void>
@@ -593,9 +712,9 @@ describe('MobileNativeChatComposer', () => {
       pendingSend = sendButton().props.onPress()
       await Promise.resolve()
     })
-    const suggestion = renderer!.root.findAll(
-      (node) => node.type === 'Pressable' && !node.props.accessibilityLabel
-    )[0] as { props: { onPress: () => void } }
+    const suggestion = renderer!.root.find(
+      (node) => node.props.accessibilityLabel === '/clear' && node.props.onPress !== undefined
+    )
     await act(async () => suggestion.props.onPress())
     await act(async () => {
       resolveSend?.(true)

@@ -12,7 +12,7 @@ const createWebRuntimeSessionBrowserTabMock = vi.hoisted(() => vi.fn())
 const runtimeEnvironmentCall = vi.fn()
 const runtimeEnvironmentTransportCall = vi.fn()
 
-vi.mock('@/runtime/web-runtime-session', () => ({
+vi.mock('@/runtime/web-runtime-browser-creation', () => ({
   createWebRuntimeSessionBrowserTab: createWebRuntimeSessionBrowserTabMock
 }))
 
@@ -86,15 +86,29 @@ describe('createBrowserSlice runtime guard', () => {
     ])
   })
 
-  it('forwards profile UA options to the active runtime environment', async () => {
+  it('keeps the default profile pick when a server profile fetch fails', async () => {
+    const store = createTestStore()
+    runtimeEnvironmentCall.mockRejectedValueOnce(new Error('timed out'))
+    store.setState({
+      settings: settingsWithRuntime('env-1'),
+      defaultBrowserSessionProfileId: 'work',
+      defaultBrowserSessionProfileIdByHostId: { 'runtime:env-1': 'work' }
+    })
+
+    await store.getState().fetchBrowserSessionProfiles()
+
+    expect(store.getState().defaultBrowserSessionProfileId).toBe('work')
+    expect(store.getState().defaultBrowserSessionProfileIdByHostId['runtime:env-1']).toBe('work')
+  })
+
+  it('creates a profile in the active runtime environment', async () => {
     const store = createTestStore()
     const profile = {
       id: 'remote-google',
       scope: 'isolated' as const,
       partition: 'persist:remote-google',
       label: 'Google',
-      source: null,
-      userAgentMode: 'native' as const
+      source: null
     }
     runtimeEnvironmentCall.mockResolvedValueOnce({
       id: 'rpc-create',
@@ -105,16 +119,29 @@ describe('createBrowserSlice runtime guard', () => {
     store.setState({ settings: settingsWithRuntime('env-1') })
 
     await expect(
-      store
-        .getState()
-        .createBrowserSessionProfile('isolated', 'Google', { userAgentMode: 'native' })
+      store.getState().createBrowserSessionProfile('isolated', 'Google')
     ).resolves.toEqual(profile)
     expect(runtimeEnvironmentCall).toHaveBeenCalledWith({
       selector: 'env-1',
       method: 'browser.profileCreate',
-      params: { scope: 'isolated', label: 'Google', userAgentMode: 'native' },
+      params: { scope: 'isolated', label: 'Google' },
       timeoutMs: 15_000
     })
+  })
+
+  it("loads this computer's profiles on request while a server is selected", async () => {
+    const store = createTestStore()
+    mockApi.browser.sessionListProfiles.mockResolvedValueOnce([
+      { id: 'work', scope: 'isolated', partition: 'persist:work', label: 'Work', source: null }
+    ])
+    store.setState({ settings: settingsWithRuntime('env-1'), browserSessionProfiles: [] })
+
+    await store.getState().fetchBrowserSessionProfiles('local')
+
+    expect(runtimeEnvironmentCall).not.toHaveBeenCalled()
+    expect(store.getState().browserSessionProfilesByHostId.local?.[0]?.id).toBe('work')
+    // The server's list, which Browser settings is showing, stays as it was.
+    expect(store.getState().browserSessionProfiles).toEqual([])
   })
 
   it('keeps browser profile lists separate per host', async () => {
@@ -213,8 +240,7 @@ describe('createBrowserSlice runtime guard', () => {
     })
   })
 
-  // Why: the picker must offer the machine the import will read from, or a headless remote leaves
-  // it empty (feature unreachable) or offers profile names that only exist on the remote.
+  // Offer browsers on the machine import reads: headless remotes otherwise produce empty or wrong-host choices.
   it('lists this desktop’s browsers when the environment’s pages are client-hosted', async () => {
     const store = createTestStore()
     store.setState({ settings: settingsWithRuntime('env-1') })
@@ -337,27 +363,70 @@ describe('createBrowserSlice runtime guard', () => {
     ])
   })
 
-  it('forwards profile UA options to local browser IPC', async () => {
+  it('drops the default profile pick once a refreshed list no longer has it', async () => {
+    const store = createTestStore()
+    const listed = (id: string) => ({
+      id,
+      scope: id === 'default' ? ('default' as const) : ('isolated' as const),
+      partition: `persist:${id}`,
+      label: id,
+      source: null
+    })
+    store.setState({
+      defaultBrowserSessionProfileId: 'work',
+      defaultBrowserSessionProfileIdByHostId: { local: 'work' }
+    })
+    mockApi.browser.sessionListProfiles
+      .mockResolvedValueOnce([listed('default'), listed('work')])
+      .mockResolvedValueOnce([listed('default')])
+
+    await store.getState().fetchBrowserSessionProfiles('local')
+    expect(store.getState().defaultBrowserSessionProfileIdByHostId.local).toBe('work')
+
+    await store.getState().fetchBrowserSessionProfiles('local')
+    expect(store.getState().defaultBrowserSessionProfileId).toBeNull()
+    expect(store.getState().defaultBrowserSessionProfileIdByHostId.local).toBeNull()
+  })
+
+  it('keeps the newest listing when an older one answers last', async () => {
+    const store = createTestStore()
+    const listed = (id: string) => ({
+      id,
+      scope: id === 'default' ? ('default' as const) : ('isolated' as const),
+      partition: `persist:${id}`,
+      label: id,
+      source: null
+    })
+    const older = Promise.withResolvers<ReturnType<typeof listed>[]>()
+    mockApi.browser.sessionListProfiles
+      .mockReturnValueOnce(older.promise)
+      .mockResolvedValueOnce([listed('default')])
+
+    const olderFetch = store.getState().fetchBrowserSessionProfiles('local')
+    await store.getState().fetchBrowserSessionProfiles('local')
+    older.resolve([listed('default'), listed('deleted')])
+    await olderFetch
+
+    expect(store.getState().browserSessionProfilesByHostId.local).toEqual([listed('default')])
+  })
+
+  it('creates a profile through local browser IPC', async () => {
     const store = createTestStore()
     const profile = {
       id: 'local-google',
       scope: 'isolated' as const,
       partition: 'persist:local-google',
       label: 'Google',
-      source: null,
-      userAgentMode: 'native' as const
+      source: null
     }
     mockApi.browser.sessionCreateProfile.mockResolvedValueOnce(profile)
 
     await expect(
-      store
-        .getState()
-        .createBrowserSessionProfile('isolated', 'Google', { userAgentMode: 'native' })
+      store.getState().createBrowserSessionProfile('isolated', 'Google')
     ).resolves.toEqual(profile)
     expect(mockApi.browser.sessionCreateProfile).toHaveBeenCalledWith({
       scope: 'isolated',
-      label: 'Google',
-      userAgentMode: 'native'
+      label: 'Google'
     })
   })
 })

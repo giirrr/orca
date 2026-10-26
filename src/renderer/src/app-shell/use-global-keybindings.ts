@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { translate } from '@/i18n/i18n'
 import { canShowRightSidebarForView } from '@/lib/right-sidebar-visibility'
-import { isEditableTarget } from '../lib/editable-target'
+import { fileSearchClaimsTextKey } from '../lib/file-search-shortcut-policy'
 import { getSelectedTextForFileSearch } from '../lib/file-search-selection'
 import { registerAppCommandDispatcher } from '@/lib/app-command-dispatch'
 import { executePluginCommand } from '@/lib/plugin-command-execution'
@@ -40,13 +40,9 @@ import {
 } from './app-command-handlers'
 import type { AppChromeLayout } from './use-app-chrome-layout'
 import type { FloatingWorkspacePanelState } from './use-floating-workspace-panel'
+import { addAppKeyListener, removeAppKeyListener } from '@/lib/app-keyboard-router'
 
-/**
- * Registers the window-level shortcut listeners and the app command dispatcher.
- *
- * Window key listeners are global and long-lived: one registration, but the handler reads
- * current shortcut state each key event through a ref.
- */
+/** Register window listeners once; each key event reads the latest committed shortcut state through a ref. */
 export function useGlobalKeybindings(args: {
   layout: AppChromeLayout
   floatingWorkspace: FloatingWorkspacePanelState
@@ -73,9 +69,7 @@ export function useGlobalKeybindings(args: {
     workspaceChromeActive: layout.workspaceChromeActive
   }
   const shortcutStateRef = useRef(shortcutState)
-  // Why useLayoutEffect: the mirror must be current before any key event can read it, and a
-  // render-phase write would also publish state from a render React discards. Key events are
-  // discrete, so they always observe the committed value.
+  // Mirror committed state before discrete key events; render-phase writes could leak discarded renders.
   useLayoutEffect(() => {
     shortcutStateRef.current = shortcutState
   })
@@ -104,11 +98,11 @@ export function useGlobalKeybindings(args: {
         terminalShortcutPolicy
       } = state
 
-      // Child handlers (e.g. terminal search) share this window capture phase and fire first; bail if they already preventDefault'd so both don't act.
-      if (input.defaultPrevented) {
+      // Other routed owners may run first; never act twice on prevented input.
+      if (input.defaultPrevented || input.isComposing || input.key === 'Process') {
         return
       }
-      // The Settings shortcut recorder captures existing shortcuts, so global handlers must not fire while its button has focus.
+      // Let the focused Settings recorder capture shortcuts without executing them.
       if (
         input.target instanceof Element &&
         input.target.closest('[data-shortcut-recorder-active]') !== null
@@ -117,7 +111,7 @@ export function useGlobalKeybindings(args: {
       }
       const context = getKeybindingContext(input.target)
 
-      // Note: some shortcuts are also intercepted in createMainWindow.ts before-input-event (for browser-guest focus); the renderer keeps handlers for local focus.
+      // Main also intercepts browser-guest shortcuts; renderer handlers cover local focus.
 
       const matchShortcut = (actionId: KeybindingActionId): boolean =>
         keybindingMatchesAction(actionId, input, shortcutPlatform, keybindings, {
@@ -138,7 +132,7 @@ export function useGlobalKeybindings(args: {
       const canRevealRightSidebar = !creationLayoutActive && canShowRightSidebarForView(activeView)
 
       if (matchShortcut('sidebar.search.toggle') && canRevealRightSidebar) {
-        // With a folder selected in the explorer, Cmd/Ctrl+Shift+F means "Find in Folder" — seed the include pattern with it, not a text search.
+        // Find in Folder uses the selected folder as an include pattern.
         const selectedFolderRelativePath =
           document.activeElement instanceof Element
             ? selectedExplorerFolderRelativePath(document.activeElement)
@@ -176,7 +170,7 @@ export function useGlobalKeybindings(args: {
         return
       }
 
-      // Floating panel closed → its keydown handler is gone, so honor the maximize chord here by opening it pre-maximized (no-op while it's open).
+      // A closed floating panel has no handler; honor maximize by opening it pre-maximized.
       if (
         !floatingTerminalOpen &&
         matchShortcut('floatingWorkspace.maximize') &&
@@ -188,16 +182,16 @@ export function useGlobalKeybindings(args: {
       }
 
       // Skip editable surfaces so TipTap's Cmd+B bold works; this renderer-side fallback covers the blur→press IPC race (docs/markdown-cmd-b-bold-design.md).
-      if (isEditableTarget(input.target)) {
+      if (fileSearchClaimsTextKey(input)) {
         return
       }
 
-      // Let floating-terminal SSH/tmux control chords reach the terminal (xterm's helper textarea isn't a generic editable target).
+      // Let SSH/tmux control chords reach xterm; its helper textarea is not an ordinary editor.
       if (isFloatingWorkspaceTerminalInputTarget(input.target)) {
         return
       }
 
-      // Only short-circuit chords the floating panel itself claims; suppressing others here would silently no-op them when focus is in the panel.
+      // Suppress only chords the focused floating panel claims; let others fall through.
       if (isFloatingWorkspacePanelFocused()) {
         const floatingMatchOptions: KeybindingMatchOptions = { context, terminalShortcutPolicy }
         if (
@@ -213,9 +207,7 @@ export function useGlobalKeybindings(args: {
         }
       }
 
-      // Plugin chords are user-reviewed instructional content. They win over
-      // built-in defaults only in app focus; terminal/editor/browser handlers
-      // retain their own shortcut authority.
+      // Reviewed plugin chords beat built-in defaults only in app focus; terminal/editor/browser retain their own authority.
       if (context === 'app') {
         const pluginCommand = findPluginCommandForKeybinding(
           pluginCommands,
@@ -239,13 +231,19 @@ export function useGlobalKeybindings(args: {
       if (matchShortcut('workspace.delete') && handlers.get('workspace.delete')?.()) {
         return
       }
+      if (
+        matchShortcut('sidebar.childWorkspaces.toggle') &&
+        handlers.get('sidebar.childWorkspaces.toggle')?.()
+      ) {
+        return
+      }
       for (const actionId of PLUGIN_COMMAND_ALIAS_ACTION_IDS) {
         if (matchShortcut(actionId) && handlers.get(actionId)?.()) {
           return
         }
       }
 
-      // Unbound by default, so it runs after the built-in alias handlers above; only consumes the chord when the active worktree has unsent notes.
+      // Run this unbound alias after built-ins; claim it only when unsent review notes exist.
       if (canRevealRightSidebar && matchShortcut('sourceControl.sendReviewNotes')) {
         if (actions.openDiffNotesSendMenuForActiveWorktree()) {
           input.preventDefault()
@@ -272,8 +270,10 @@ export function useGlobalKeybindings(args: {
         return
       }
       if (detected) {
-        // Synthetic input: no key/modifier flags, so only DoubleTap bindings match.
+        // No key/modifier flags: synthetic input matches only DoubleTap bindings.
         dispatchShortcutInput({
+          isComposing: e.isComposing,
+          altGraph: e.getModifierState('AltGraph'),
           doubleTapModifier: detected.modifier,
           target: e.target,
           defaultPrevented: e.defaultPrevented,
@@ -282,6 +282,8 @@ export function useGlobalKeybindings(args: {
         return
       }
       dispatchShortcutInput({
+        isComposing: e.isComposing,
+        altGraph: e.getModifierState('AltGraph'),
         key: e.key,
         code: e.code,
         altKey: e.altKey,
@@ -309,16 +311,16 @@ export function useGlobalKeybindings(args: {
       )
     }
 
-    // Why: a window blur mid-gesture must not leave the detector armed.
+    // Blur must disarm an unfinished gesture.
     const onBlur = (): void => doubleTapDetector.reset()
 
-    window.addEventListener('keydown', onKeyDown, { capture: true })
-    window.addEventListener('keyup', onKeyUp, { capture: true })
+    addAppKeyListener('keydown', onKeyDown)
+    addAppKeyListener('keyup', onKeyUp)
     window.addEventListener('blur', onBlur)
     return () => {
       unregisterAppCommandDispatcher()
-      window.removeEventListener('keydown', onKeyDown, { capture: true })
-      window.removeEventListener('keyup', onKeyUp, { capture: true })
+      removeAppKeyListener('keydown', onKeyDown)
+      removeAppKeyListener('keyup', onKeyUp)
       window.removeEventListener('blur', onBlur)
     }
   }, [])

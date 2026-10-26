@@ -40,6 +40,8 @@ export type NativeChatPtySessionOptionsSurface = SessionOptionsSurface & {
   recordOutgoingCommand(command: string): void
   reportSessionOptions(values: Record<string, SessionOptionValue>): void
   replaceModels(models: CatalogModel[]): void
+  /** The context window the host's model listing states for `modelId`, or null. */
+  contextWindowTokens(modelId: string): number | null
 }
 
 export type CreateNativeChatPtySessionOptionsArgs = {
@@ -48,6 +50,7 @@ export type CreateNativeChatPtySessionOptionsArgs = {
   fallbackScopeKey?: string
   initialModels?: readonly CatalogModel[]
   mode: NativeChatSessionOptionMode
+  canSwitchOmpModel?: boolean
   reportedValues?: Record<string, SessionOptionValue> | null
   dispatchCommand: NativeChatSessionOptionDispatchCommand
   onAgentPicker?: () => void
@@ -58,13 +61,16 @@ export type CreateNativeChatPtySessionOptionsArgs = {
 export function createNativeChatPtySessionOptions(
   args: CreateNativeChatPtySessionOptionsArgs
 ): NativeChatPtySessionOptionsSurface | null {
-  const catalog = getAgentSessionOptionCatalog(args.agent)
-  if (!catalog) {
+  const baseCatalog = getAgentSessionOptionCatalog(args.agent)
+  if (!baseCatalog) {
     return null
   }
+  const catalog =
+    args.agent === 'omp' && args.mode === 'live' && !args.canSwitchOmpModel
+      ? { ...baseCatalog, modelApply: { ...baseCatalog.modelApply, midSession: undefined } }
+      : baseCatalog
   let models = [...(args.initialModels ?? catalog.models)]
-  // The enrichment cache only ever holds probe output, so being handed a list at all
-  // means `isDefault` below names the account's real default rather than the seed guess.
+  // Cached enrichment contains probe results, so its default is authoritative rather than a seed guess.
   let modelsAreDiscovered = args.initialModels !== undefined
   let record =
     readNativeChatSessionOptionCache(args.scopeKey, args.fallbackScopeKey) ??
@@ -76,9 +82,7 @@ export function createNativeChatPtySessionOptions(
   if (args.reportedValues && applyNativeChatReportedSessionOptions(record, args.reportedValues)) {
     writeNativeChatSessionOptionCache(args.scopeKey, record)
   }
-  /** Why: an authoritative probe proved this id gone; left tracked it would re-enter
-   *  the picker via re-injection and re-persist the fatal `-m` on any later option
-   *  write, undoing the settings retirement. */
+  /** Untrack probe-retired ids so reinjection and later option writes cannot restore fatal launch flags. */
   const untrackRetiredModel = (): boolean => {
     if (!catalog.discoveredModelsAreAuthoritative || !modelsAreDiscovered) {
       return false
@@ -122,9 +126,7 @@ export function createNativeChatPtySessionOptions(
     clearNativeChatSessionModel(record)
   }
 
-  /** Resolved at commit, not pre-dispatch: with nothing tracked the pre-dispatch id was
-   *  only the seed's guess at grok's default, and a probe landing mid-dispatch replaces
-   *  it with the id the CLI actually reported — the model the command truly reached. */
+  /** Resolve at commit so discovery replaces untracked seed guesses with the model the CLI actually used. */
   const setTrackedValue = (
     optionId: string,
     value: SessionOptionValue,
@@ -138,17 +140,18 @@ export function createNativeChatPtySessionOptions(
       resolveEffectiveNativeChatModelId(catalog, activeModels(), record)
     )
 
-  /** The sole answer to "may this id become the persisted `-m` launch flag?", read at
-   *  persist time because a probe can settle mid-pick. Before one, `isDefault` is just
-   *  the seed's guess, so only an id the session actually tracks is evidence of
-   *  anything; after one, an authoritative list that omits the id proves it retired —
-   *  adopting either would emit an `-m` that is fatal on an account without it. */
-  const modelIsAdoptableAsLaunchDefault = (modelId: string): boolean =>
-    modelsAreDiscovered
-      ? !catalog.discoveredModelsAreAuthoritative || models.some((model) => model.id === modelId)
+  /** Persist only listed, selected or discovered ids; authoritative omissions prove retirement. Recheck after awaits to avoid fatal -m flags. */
+  const modelIsAdoptableAsLaunchDefault = (modelId: string): boolean => {
+    const listedIn = (list: readonly CatalogModel[]): boolean =>
+      list.some((model) => model.id === modelId)
+    if (!listedIn(models) && !listedIn(catalog.models)) {
+      return false
+    }
+    return modelsAreDiscovered
+      ? !catalog.discoveredModelsAreAuthoritative || listedIn(models)
       : record.model !== undefined
+  }
 
-  /** Every persist path — picker applies and typed commands — funnels through here. */
   const persist = (modelId: string | null, optionId: string, value: SessionOptionValue): void => {
     if (modelId) {
       void args.persistSelection?.({
@@ -207,6 +210,8 @@ export function createNativeChatPtySessionOptions(
       modelsAreDiscovered = true
       untrackRetiredModel()
       publish()
-    }
+    },
+    contextWindowTokens: (modelId) =>
+      models.find((model) => model.id === modelId)?.contextWindowTokens ?? null
   }
 }

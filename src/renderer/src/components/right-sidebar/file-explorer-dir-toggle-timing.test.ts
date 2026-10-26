@@ -10,12 +10,11 @@ import {
 describe('resolveDirToggleTiming', () => {
   it('toggles immediately when the click misses the rename hotspot', () => {
     expect(resolveDirToggleTiming({ fromRenameHotspot: false, clickCount: 1 })).toBe('immediate')
-    // Why: the chevron and empty row area must stay instant even on a fast double click.
     expect(resolveDirToggleTiming({ fromRenameHotspot: false, clickCount: 2 })).toBe('immediate')
   })
 
-  it('defers the first click on the filename so a double click can cancel it', () => {
-    expect(resolveDirToggleTiming({ fromRenameHotspot: true, clickCount: 1 })).toBe('deferred')
+  it('toggles the first click on the filename instantly, same as the chevron', () => {
+    expect(resolveDirToggleTiming({ fromRenameHotspot: true, clickCount: 1 })).toBe('immediate')
   })
 
   it('drops the toggle on the second click, which belongs to the rename', () => {

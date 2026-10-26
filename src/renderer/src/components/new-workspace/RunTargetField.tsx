@@ -1,3 +1,4 @@
+import { ImeInput } from '@/lib/ime-text-field'
 import React from 'react'
 import { ChevronDown, Cloud } from 'lucide-react'
 import { PopoverAnchor } from '@/components/ui/popover'
@@ -7,11 +8,7 @@ import type { ExecutionHostId } from '../../../../shared/execution-host'
 import { HostRowIcon } from './RunTargetComboboxRow'
 import { COMBOBOX_FIELD_SHELL } from './type-ahead-combobox-styles'
 
-/**
- * The run-target field: a text input that *is* the search box, painted over
- * with the committed selection so a long label and its path shrink at
- * different rates instead of truncating as one flat string.
- */
+/** Overlay committed label/path on the search input so they can shrink independently. */
 export default function RunTargetField({
   query,
   onQueryChange,
@@ -63,7 +60,7 @@ export default function RunTargetField({
           ) : null}
         </span>
         <div className="relative min-w-0 flex-1 overflow-hidden">
-          <input
+          <ImeInput
             ref={inputRef}
             type="text"
             role="combobox"

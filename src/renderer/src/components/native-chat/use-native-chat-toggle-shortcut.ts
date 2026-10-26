@@ -7,10 +7,12 @@ import { canToggleNativeChat } from './native-chat-availability'
 import { isNativeChatTranscriptLocalReadable } from '@/lib/native-chat-transcript-readability'
 import { isMacPlatform, matchesNativeChatToggleShortcut } from './native-chat-shortcut'
 import { getConnectionIdFromState } from '@/lib/connection-context'
+import { resolveKeyboardWorkspaceId } from '@/lib/floating-workspace-terminal-actions'
 import {
   isNativeChatTabWideFallbackSafe,
   resolveNativeChatActiveLayoutLeafId
 } from './native-chat-leaf-routing'
+import { addAppKeyListener, removeAppKeyListener } from '@/lib/app-keyboard-router'
 
 export function resolveNativeChatToggleShortcutDetectedAgent({
   terminalTabId,
@@ -35,10 +37,7 @@ export function resolveNativeChatToggleShortcutDetectedAgent({
   )
 }
 
-/** Toggles the active worktree's focused agent-terminal tab between the terminal
- *  and native chat views via the keyboard. Gated to the active worktree so only
- *  one listener acts at a time, and to agent terminals so the chord is inert on
- *  plain shells / non-terminal surfaces. */
+/** Toggle supported agent-terminal views only on the key event’s originating workspace surface. */
 export function useNativeChatToggleShortcut(worktreeId: string, isWorktreeActive: boolean): void {
   useEffect(() => {
     if (!isWorktreeActive) {
@@ -50,6 +49,10 @@ export function useNativeChatToggleShortcut(worktreeId: string, isWorktreeActive
         return
       }
       const state = useAppStore.getState()
+      // Main and floating surfaces can coexist; only the key’s originating surface may act.
+      if (resolveKeyboardWorkspaceId(e.target, state.activeWorktreeId) !== worktreeId) {
+        return
+      }
       const activeGroupId = state.activeGroupIdByWorktree[worktreeId]
       const group = (state.groupsByWorktree[worktreeId] ?? []).find((g) => g.id === activeGroupId)
       if (!group?.activeTabId) {
@@ -58,19 +61,13 @@ export function useNativeChatToggleShortcut(worktreeId: string, isWorktreeActive
       const tab = (state.unifiedTabsByWorktree[worktreeId] ?? []).find(
         (candidate) => candidate.id === group.activeTabId
       )
-      // contentType gates out standalone structured (agent-session) tabs;
-      // structuredSessionId gates out a terminal tab that adopted one, which
-      // renders the structured surface with no TUI to switch back to.
-      if (!tab || tab.contentType !== 'terminal' || tab.structuredSessionId) {
+      if (!tab || tab.contentType !== 'terminal') {
         return
       }
       const terminalTab = (state.tabsByWorktree[worktreeId] ?? []).find(
         (candidate) => candidate.id === tab.entityId
       )
-      // Carry the agent identity (not just "an agent exists") so the chord stays
-      // inert on unsupported agents (e.g. Gemini), matching the menu/header gate.
-      // Pane keys are `${entityId}:${leafId}` — the backing terminal tab id, not
-      // the unified tab id.
+      // Resolve the actual supported agent from backing terminal-tab pane keys, matching the menu/header gate.
       const terminalLayout = state.terminalLayoutsByTabId[tab.entityId]
       const tabWideFallbackSafe = isNativeChatTabWideFallbackSafe(terminalLayout)
       const detectedAgent = resolveNativeChatToggleShortcutDetectedAgent({
@@ -84,7 +81,6 @@ export function useNativeChatToggleShortcut(worktreeId: string, isWorktreeActive
           : null
       if (
         !canToggleNativeChat({
-          experimentalNativeChatEnabled: state.settings?.experimentalNativeChat === true,
           contentType: 'terminal',
           launchAgent: detectedAgent || !tabWideFallbackSafe ? null : terminalTab?.launchAgent,
           detectedAgent,
@@ -101,9 +97,9 @@ export function useNativeChatToggleShortcut(worktreeId: string, isWorktreeActive
       e.stopPropagation()
       state.toggleTabViewMode(tab.id)
     }
-    window.addEventListener('keydown', onKeyDown, { capture: true })
+    addAppKeyListener('keydown', onKeyDown)
     return () => {
-      window.removeEventListener('keydown', onKeyDown, { capture: true })
+      removeAppKeyListener('keydown', onKeyDown)
     }
   }, [worktreeId, isWorktreeActive])
 }

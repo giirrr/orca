@@ -6,6 +6,7 @@ import {
   logicalKeyTokenFromInput,
   physicalCodeKeyTokenFromInput,
   numpadCodeKeyTokenFromInput,
+  shouldUseMacOptionComposedCaptureFallback,
   isPunctuationKeyToken
 } from './input'
 
@@ -22,6 +23,13 @@ export function platformModifiers(
   }
 }
 
+// Why: '+' and '_' need Shift on US keyboards but not on others (German '+', AZERTY '_'), so Shift is how the layout spells them.
+const SHIFT_AGNOSTIC_KEY_TOKENS = new Set(['Plus', 'Underscore'])
+
+export function isShiftAgnosticKeyToken(key: string): boolean {
+  return SHIFT_AGNOSTIC_KEY_TOKENS.has(key)
+}
+
 export function modifierStateMatches(
   parsed: ParsedKeybinding,
   input: KeybindingInput,
@@ -32,7 +40,7 @@ export function modifierStateMatches(
     hasModifier(input, 'meta') === expected.meta &&
     hasModifier(input, 'control') === expected.control &&
     hasModifier(input, 'alt') === expected.alt &&
-    hasModifier(input, 'shift') === expected.shift
+    (isShiftAgnosticKeyToken(parsed.key) || hasModifier(input, 'shift') === expected.shift)
   )
 }
 
@@ -90,7 +98,11 @@ export function digitKeyMatches(
   if (logicalKey && logicalKey.length === 1 && logicalKey >= '0' && logicalKey <= '9') {
     return logicalKey === digit
   }
-  return canFallBackToPhysicalCode(input, platform) && input.code === `Digit${digit}`
+  const macOptionDigit =
+    logicalKey === null && shouldUseMacOptionComposedCaptureFallback(input, platform)
+  return (
+    (canFallBackToPhysicalCode(input, platform) || macOptionDigit) && input.code === `Digit${digit}`
+  )
 }
 
 export function semanticPunctuationKey(input: KeybindingInput): string | null {

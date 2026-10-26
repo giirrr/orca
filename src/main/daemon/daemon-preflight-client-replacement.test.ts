@@ -1,3 +1,4 @@
+import './mock-descendant-sweep'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { connect, type Socket } from 'node:net'
 import { join } from 'node:path'
@@ -89,7 +90,7 @@ describe('daemon preflight client replacement', () => {
         rows: 24
       })
       .catch(() => {
-        /* replacement disconnects the original request */
+        /* Replacement disconnects this pending request. */
       })
     await vi.waitFor(() => expect(preparePtySpawn).toHaveBeenCalledOnce())
 

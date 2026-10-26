@@ -31,7 +31,6 @@ describe('normalizeWorkspaceDocHistoryEntries', () => {
     )
     const entries = normalizeWorkspaceDocHistoryEntries(oversized)
     expect(entries).toHaveLength(MAX_WORKSPACE_DOC_HISTORY_ENTRIES)
-    // The oldest rows are the dropped ones.
     expect(entries.at(-1)?.lastVisitedAt).toBe(10)
   })
 
@@ -52,5 +51,37 @@ describe('normalizeWorkspaceDocHistoryEntries', () => {
   it('title fence falls back to the file for empty titles', () => {
     expect(normalizeWorkspaceDocHistoryTitle('', DOC)).toBe('a.html')
     expect(normalizeWorkspaceDocHistoryTitle('Report', DOC)).toBe('Report')
+  })
+  it('indexes document identity while deduplicating a large legacy history', () => {
+    let reads = 0
+    const entries = Array.from({ length: 10_000 }, (_, i) =>
+      entry({
+        docLocation: {
+          kind: 'workspace-doc',
+          get worktreeId() {
+            reads++
+            return 'wt-1'
+          },
+          filePath: `/repo/${i % 99}.html`
+        },
+        lastVisitedAt: i
+      })
+    )
+    const result = normalizeWorkspaceDocHistoryEntries(entries)
+    expect(reads).toBeLessThanOrEqual(20_000)
+    expect(result).toHaveLength(99)
+    expect(result.map((row) => row.lastVisitedAt)).toEqual(
+      Array.from({ length: 99 }, (_, i) => 9999 - i)
+    )
+  })
+
+  it('keeps workspace and file identity separate, including separator-like text', () => {
+    const locations = [
+      { kind: 'workspace-doc' as const, worktreeId: 'a::b', filePath: 'c' },
+      { kind: 'workspace-doc' as const, worktreeId: 'a', filePath: 'b::c' },
+      { kind: 'workspace-doc' as const, worktreeId: 'a', filePath: 'B::c' }
+    ]
+    const entries = locations.map((docLocation) => entry({ docLocation }))
+    expect(normalizeWorkspaceDocHistoryEntries(entries)).toEqual(entries)
   })
 })

@@ -1,61 +1,17 @@
+import { separateImagePasteFromFollowingText } from '../../../src/shared/image-paste-following-text'
+import { reportWorkerTerminalUserInput } from '../terminal/worker-terminal-takeover-report'
 import { useCallback, type RefObject } from 'react'
-import * as Clipboard from 'expo-clipboard'
-import { File as FsFile, Paths } from 'expo-file-system'
-import { ImageManipulator, SaveFormat } from 'expo-image-manipulator'
+import { terminalInputSend } from '../terminal/mobile-terminal-operations'
+import { useClipboardReader } from '../platform/clipboard'
 import type { TerminalModes } from '../terminal/terminal-webview-contract'
 import type { RpcClient } from '../transport/rpc-client'
 import type { ConnectionState } from '../transport/types'
 import {
-  buildMobileImagePastePayload,
+  buildMobileTerminalImagePastePayload,
   prepareMobileClipboardImageBase64,
-  saveMobileClipboardImageAsTempFile,
-  type MobileClipboardImageResizer
+  saveMobileClipboardImageAsTempFile
 } from './mobile-clipboard-image'
-
-const CLIPBOARD_IMAGE_DATA_URL_PREFIX_RE = /^data:image\/[a-z0-9.+-]+;base64,/i
-
-// Why: clipboard images are re-encoded as lossless PNG, so high-res screenshots and
-// photos can exceed the upload byte budget; resize the raster down to fit before upload.
-// The iOS ImageManipulator loader cannot decode large base64 data URIs, so use a file.
-const resizeMobileClipboardImage: MobileClipboardImageResizer = async (source, target) => {
-  const base64 = source.replace(CLIPBOARD_IMAGE_DATA_URL_PREFIX_RE, '')
-  const file = new FsFile(Paths.cache, `orca-clip-resize-${Date.now()}.png`)
-  let context: ReturnType<typeof ImageManipulator.manipulate> | null = null
-  let rendered: Awaited<
-    ReturnType<ReturnType<typeof ImageManipulator.manipulate>['renderAsync']>
-  > | null = null
-  let resultUri: string | null = null
-  try {
-    file.create({ overwrite: true })
-    file.write(base64, { encoding: 'base64' })
-    context = ImageManipulator.manipulate(file.uri)
-    context.resize({ width: target.width, height: target.height })
-    rendered = await context.renderAsync()
-    const result = await rendered.saveAsync({ format: SaveFormat.PNG, base64: true })
-    resultUri = result.uri
-    // Why: empty base64 would pass the downstream base64 check and upload a corrupt
-    // image, so fail loudly here instead of silently sending an invalid payload.
-    if (!result.base64) {
-      throw new Error('Failed to encode resized clipboard image')
-    }
-    return { data: result.base64, width: result.width, height: result.height }
-  } finally {
-    rendered?.release()
-    context?.release()
-    if (resultUri) {
-      try {
-        new FsFile(resultUri).delete()
-      } catch {
-        // Best-effort cleanup; ImageManipulator saves into cache for every retry.
-      }
-    }
-    try {
-      file.delete()
-    } catch {
-      // Best-effort cleanup; the OS reclaims the cache directory regardless.
-    }
-  }
-}
+import { resizeMobileClipboardImage } from './mobile-clipboard-image-resize'
 
 function buildMobileTerminalClipboardTextPayload(
   text: string,
@@ -70,6 +26,7 @@ function buildMobileTerminalClipboardTextPayload(
 }
 
 type UseMobileTerminalPasteOptions = {
+  readonly agent?: string | null
   readonly activeHandle: string | null
   readonly activeHandleRef: RefObject<string | null>
   readonly activeSessionTabTypeRef: RefObject<string | null>
@@ -90,6 +47,7 @@ type UseMobileTerminalPasteOptions = {
 
 export function useMobileTerminalPaste({
   activeHandle,
+  agent,
   activeHandleRef,
   activeSessionTabTypeRef,
   canSend,
@@ -106,13 +64,15 @@ export function useMobileTerminalPaste({
   refreshCanPaste,
   showToast
 }: UseMobileTerminalPasteOptions): () => Promise<void> {
+  // Read images through native media handles: inline clipboard base64 can exceed the bridge reply cap.
+  const clipboard = useClipboardReader()
   return useCallback(async () => {
     if (!client || !activeHandle || !canSend) {
       return
     }
     const targetHandle = activeHandle
     try {
-      const text = await Clipboard.getStringAsync()
+      const text = await clipboard.readText()
       let payload: string | null = null
       if (text.length > 0) {
         payload = buildMobileTerminalClipboardTextPayload(
@@ -120,8 +80,11 @@ export function useMobileTerminalPaste({
           ptyModesRef.current.get(targetHandle)
         )
       } else {
-        const image = await Clipboard.getImageAsync({ format: 'png' })
+        const image = await clipboard.readImage()
         if (!image) {
+          // Null also covers iOS paste denial and undecodable images.
+          onError()
+          showToast("Couldn't read the clipboard", 1500)
           refreshCanPaste()
           return
         }
@@ -130,32 +93,41 @@ export function useMobileTerminalPaste({
         const imagePath = await saveMobileClipboardImageAsTempFile(client, base64, {
           connectionId
         })
-        payload = buildMobileImagePastePayload(imagePath)
+        payload = separateImagePasteFromFollowingText(
+          buildMobileTerminalImagePastePayload(imagePath, agent),
+          true
+        )
       }
 
       const wrappedBytes = new TextEncoder().encode(payload).byteLength
       if (wrappedBytes > 256 * 1024) {
         onError()
-        // eslint-disable-next-line no-console
         console.warn('[mobile-clip] paste oversized', { wrappedBytes })
         showToast('Paste too large (max 256 KiB)', 1500)
         return
       }
-      // Why: paste lives in the accessory row and must not overtake pending IME text.
+      // Accessory paste must follow pending IME text.
       const flushedPendingInput = await flushPendingLiveInputBeforeExternalSend(targetHandle)
-      if (!flushedPendingInput) {
+      const currentClient = clientRef.current
+      if (!currentClient || connStateRef.current !== 'connected') {
+        onError()
+        showToast('Paste failed (disconnected)', 1500)
         return
       }
-      const currentClient = clientRef.current
       if (
-        !currentClient ||
-        connStateRef.current !== 'connected' ||
         targetHandle !== activeHandleRef.current ||
         activeSessionTabTypeRef.current !== 'terminal'
       ) {
+        onError()
+        showToast('Paste canceled (terminal changed)', 1500)
         return
       }
-      await currentClient.sendRequest('terminal.send', {
+      if (!flushedPendingInput) {
+        onError()
+        showToast('Paste failed', 1500)
+        return
+      }
+      const response = await terminalInputSend.request(currentClient, {
         terminal: targetHandle,
         text: payload,
         enter: false,
@@ -163,13 +135,15 @@ export function useMobileTerminalPaste({
           ? { client: { id: deviceTokenRef.current, type: 'mobile' as const } }
           : {})
       })
+      if (terminalInputSend.interpret(response) === true) {
+        reportWorkerTerminalUserInput(currentClient, targetHandle)
+      }
       onSuccess()
       refreshCanPaste()
     } catch (e) {
       onError()
       const err = e as { name?: string; message?: string }
       const isDisconnected = connState !== 'connected'
-      // eslint-disable-next-line no-console
       console.warn('[mobile-clip] paste failed', { name: err.name, message: err.message })
       if (isDisconnected) {
         showToast('Paste failed (disconnected)', 1500)
@@ -181,11 +155,13 @@ export function useMobileTerminalPaste({
     }
   }, [
     activeHandle,
+    agent,
     activeHandleRef,
     activeSessionTabTypeRef,
     canSend,
     client,
     clientRef,
+    clipboard,
     connState,
     connStateRef,
     deviceTokenRef,

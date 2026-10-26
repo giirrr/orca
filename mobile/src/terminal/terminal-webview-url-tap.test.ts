@@ -1,17 +1,16 @@
-import { createContext, Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import type { TappedFilePath } from './terminal-path-tap'
-import { TERMINAL_PATH_TAP_JS } from './terminal-path-tap-injected'
+import {
+  resolveTerminalFileUrlTap as documentResolveTerminalFileUrlTap,
+  resolveTerminalOscFileTap as documentResolveTerminalOscFileTap
+} from './document/osc-link-tap'
 import {
   TERMINAL_HTTP_URL_MAX_LENGTH,
-  TERMINAL_HTTP_URL_REGEX_SOURCE,
-  URL_TAP_WEBVIEW_JS,
   findFileUrlAtColumn,
   findUrlAtColumn,
   resolveTerminalOscFileTap,
   resolveTerminalFileUrlTap
 } from './terminal-webview-url-tap'
-import { XTERM_HTML } from './terminal-webview-html'
 
 type FileTapResolverCase = {
   name: string
@@ -92,26 +91,14 @@ const OSC_FILE_TAP_CASES: FileTapResolverCase[] = [
 
 type InjectedFileTapResolver = (uri: string) => TappedFilePath | null
 
-// Why: the WebView blob hand-translates terminal-file-url-tap.ts into plain JS
-// with re-escaped regexes; executing it against the same cases as the TS module
-// keeps the two copies from drifting (mirrors createInjectedPathMatcher).
+// Run both module implementations against identical cases so native-document URL matching cannot drift.
 function createInjectedFileTapResolvers(): {
   resolveTerminalFileUrlTap: InjectedFileTapResolver
   resolveTerminalOscFileTap: InjectedFileTapResolver
 } {
-  const context = createContext({ URL })
-  new Script(
-    `${TERMINAL_PATH_TAP_JS}\n${URL_TAP_WEBVIEW_JS}\n` +
-      'this.__resolveTerminalFileUrlTap = resolveTerminalFileUrlTap;\n' +
-      'this.__resolveTerminalOscFileTap = resolveTerminalOscFileTap;'
-  ).runInContext(context)
-  const injected = context as {
-    __resolveTerminalFileUrlTap: InjectedFileTapResolver
-    __resolveTerminalOscFileTap: InjectedFileTapResolver
-  }
   return {
-    resolveTerminalFileUrlTap: injected.__resolveTerminalFileUrlTap,
-    resolveTerminalOscFileTap: injected.__resolveTerminalOscFileTap
+    resolveTerminalFileUrlTap: documentResolveTerminalFileUrlTap,
+    resolveTerminalOscFileTap: documentResolveTerminalOscFileTap
   }
 }
 
@@ -127,10 +114,7 @@ describe.each([
     expect(resolvers.resolveTerminalOscFileTap(uri)).toEqual(expected)
   })
 
-  it.each(FILE_URL_TAP_CASES)('OSC resolver accepts file URL: $name', ({ uri, expected }) => {
-    if (expected === null) {
-      return
-    }
+  it.each(FILE_URL_TAP_CASES)('resolves or rejects OSC file URL: $name', ({ uri, expected }) => {
     expect(resolvers.resolveTerminalOscFileTap(uri)).toEqual(expected)
   })
 })
@@ -168,6 +152,15 @@ describe('findUrlAtColumn', () => {
     expect(findUrlAtColumn(line, line.length - 1)).toBeNull()
   })
 
+  it('ends the tapped URL at CJK punctuation', () => {
+    const line = '投稿（https://github.com/stablyai/orca/pull/1078）。'
+
+    expect(findUrlAtColumn(line, line.indexOf('1078'))).toBe(
+      'https://github.com/stablyai/orca/pull/1078'
+    )
+    expect(findUrlAtColumn(line, line.indexOf('）'))).toBeNull()
+  })
+
   it('only matches http(s) schemes', () => {
     const line = 'ftp://example.com/file and file:///etc/hosts'
 
@@ -190,20 +183,5 @@ describe('findUrlAtColumn', () => {
 
     const overlongUrl = `https://example.com/${'a'.repeat(TERMINAL_HTTP_URL_MAX_LENGTH)}`
     expect(findUrlAtColumn(overlongUrl, 0)).toBeNull()
-  })
-
-  it('injects URL and OSC tap handling into the WebView document', () => {
-    expect(XTERM_HTML).toContain('function findUrlAtColumn(')
-    expect(XTERM_HTML).toContain('function findFileUrlAtColumn(')
-    expect(XTERM_HTML).toContain('function fileUrlAtViewportPoint(')
-    expect(XTERM_HTML).toContain('function urlAtViewportPoint(')
-    expect(XTERM_HTML).toContain(JSON.stringify(TERMINAL_HTTP_URL_REGEX_SOURCE))
-    expect(XTERM_HTML).toContain('function oscLinkAtViewportPoint(')
-    expect(XTERM_HTML).toContain('function resolveTerminalOscFileTap(')
-    expect(XTERM_HTML).toContain('function resolveTerminalFileUrlTap(')
-    expect(XTERM_HTML).toContain('function isLocalFileUriHostname(')
-    expect(XTERM_HTML).toContain('return parsePathLineCol(value);')
-    expect(XTERM_HTML).toContain('function notifyTerminalSurfaceTap(')
-    expect(XTERM_HTML).toContain("notify({ type: 'open-url', url: tappedUrl });")
   })
 })

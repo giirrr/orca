@@ -38,8 +38,7 @@ export function normalizeGitHubReviewerLogins(
   )
 }
 
-// Why: pasted reviewer lists share the request-review hot path; reject oversized
-// text before tokenizing and avoid regex splitting accepted multiline input.
+// Reject oversized pasted input before tokenization and avoid multiline regex splitting on this hot path.
 export function parseGitHubReviewerInputLogins(
   input: string,
   maxBytes = GITHUB_PR_REVIEWER_INPUT_MAX_BYTES
@@ -185,30 +184,6 @@ export function getGitHubPRReviewerRows(item: ReviewDisplayItem): GitHubPRReview
       avatarUrl: review.avatarUrl ?? '',
       stateLabel: formatReviewState(review.state)
     })
-  }
-  return Array.from(byLogin.values())
-}
-
-export function appendGitHubPRRequestedReviewers(
-  current: readonly GitHubAssignableUser[],
-  logins: readonly string[]
-): GitHubAssignableUser[] {
-  const byLogin = new Map<string, GitHubAssignableUser>()
-  for (const user of current) {
-    const login = user.login.trim()
-    if (login) {
-      byLogin.set(login.toLowerCase(), user)
-    }
-  }
-  for (const rawLogin of logins) {
-    const login = rawLogin.trim().replace(/^@/, '')
-    if (!login) {
-      continue
-    }
-    const key = login.toLowerCase()
-    if (!byLogin.has(key)) {
-      byLogin.set(key, { login, name: null, avatarUrl: '' })
-    }
   }
   return Array.from(byLogin.values())
 }

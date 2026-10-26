@@ -12,6 +12,11 @@ import type {
 } from '../../shared/runtime-types'
 import { BrowserError } from './cdp-bridge'
 import { WAIT_PROCESS_TIMEOUT_GRACE_MS } from './agent-browser-bridge-types'
+import { acquireElectronDebugger } from './electron-debugger-lease'
+import { parseCdpKeyEvent, imeFallbackKeyEvent } from './cdp-keyboard-us-layout'
+import { dispatchPageKeyEvent, type GuestCdpSender } from './guest-direct-key-input'
+import { sendGuestCdpCommand } from './guest-cdp-command'
+import { readRemoteCliAdmittedPage } from './remote-cli-page-admission'
 import { AgentBrowserBridgeCaptureCommands } from './agent-browser-bridge-capture-commands'
 
 export abstract class AgentBrowserBridgeInteractionCommands extends AgentBrowserBridgeCaptureCommands {
@@ -89,7 +94,7 @@ export abstract class AgentBrowserBridgeInteractionCommands extends AgentBrowser
       if (normalizedState) {
         args.push('--state', normalizedState)
       }
-      // Why: agent-browser's selector wait lacks a per-command timeout — enforce it here so a missing selector fails as browser_timeout, not a hang.
+      // Bound condition waits here because agent-browser lacks a per-command timeout.
       return (await this.execAgentBrowser(sessionName, args, {
         timeoutMs:
           options?.timeout != null && hasCondition
@@ -138,7 +143,7 @@ export abstract class AgentBrowserBridgeInteractionCommands extends AgentBrowser
       browserPageId,
       async (sessionName) => {
         if (!(await this.isExplicitContentEditableTarget(sessionName, element))) {
-          // Why: agent-browser resolves the ref directly, preserving iframe/shadow-root/unfocusable semantics for ordinary fields.
+          // Let the helper resolve ordinary refs inside iframes and shadow roots, including unfocusable fields.
           await this.execAgentBrowser(sessionName, ['fill', element, ''])
           return { cleared: element }
         }
@@ -156,7 +161,6 @@ export abstract class AgentBrowserBridgeInteractionCommands extends AgentBrowser
     browserPageId?: string
   ): Promise<BrowserSelectAllResult> {
     return this.enqueueTargetedCommand(worktreeId, browserPageId, async (sessionName) => {
-      // Why: agent-browser has no select-all command — implement as focus + Ctrl+A
       await this.execAgentBrowser(sessionName, ['focus', element])
       return (await this.execAgentBrowser(sessionName, [
         'press',
@@ -170,22 +174,91 @@ export abstract class AgentBrowserBridgeInteractionCommands extends AgentBrowser
     worktreeId?: string,
     browserPageId?: string
   ): Promise<BrowserKeypressResult> {
-    return this.enqueueTargetedCommand(worktreeId, browserPageId, async (sessionName) => {
-      return (await this.execAgentBrowser(sessionName, ['press', key])) as BrowserKeypressResult
-    })
+    return this.enqueueTargetedCommand(
+      worktreeId,
+      browserPageId,
+      async (sessionName, target) => {
+        const parsed = parseCdpKeyEvent(key) ?? imeFallbackKeyEvent(key)
+        if (!parsed) {
+          // Unknown keys need the helper; create its session only on this fallback path.
+          await this.ensureSession(sessionName, target.browserPageId, target.webContentsId)
+          return (await this.execAgentBrowser(sessionName, ['press', key])) as BrowserKeypressResult
+        }
+        const wc = this.getWebContents(target.webContentsId)
+        if (!wc || wc.isDestroyed()) {
+          throw new BrowserError(
+            'browser_tab_not_found',
+            `Browser page ${target.browserPageId} is no longer available`
+          )
+        }
+        const event = {
+          windowsVirtualKeyCode: parsed.keyCode,
+          nativeVirtualKeyCode: parsed.keyCode,
+          key: parsed.key,
+          code: parsed.code,
+          modifiers: parsed.modifiers,
+          location: parsed.location
+        }
+        let releaseDebugger = (): void => {}
+        try {
+          releaseDebugger = acquireElectronDebugger(wc).release
+          const send: GuestCdpSender = (method, params, sessionId) =>
+            sendGuestCdpCommand(wc, method, params, sessionId)
+          const guardFocus = (): Promise<() => void> =>
+            this.browserManager.guardUserFocusForAgentInput(target.webContentsId)
+          await dispatchPageKeyEvent(
+            wc,
+            {
+              // keyDown without text makes Blink synthesize empty input; use rawKeyDown for editing keys.
+              type: parsed.text === null ? 'rawKeyDown' : 'keyDown',
+              ...event,
+              ...(parsed.text === null ? {} : { text: parsed.text, unmodifiedText: parsed.text })
+            },
+            send,
+            guardFocus
+          )
+          await dispatchPageKeyEvent(
+            wc,
+            {
+              type: 'keyUp',
+              ...event,
+              // Blink clears a modifier's own bit on keyup.
+              modifiers: parsed.modifiers & ~parsed.selfModifier
+            },
+            send,
+            guardFocus
+          )
+          return { pressed: key }
+        } catch (error) {
+          // Browser error codes let the pane recognize and reclaim a dead page.
+          if (error instanceof BrowserError) {
+            throw error
+          }
+          if (!this.getWebContents(target.webContentsId)) {
+            throw this.createPageUnavailableError(sessionName)
+          }
+          throw new BrowserError(
+            'browser_error',
+            `Failed to press ${key} in browser page ${target.browserPageId}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        } finally {
+          releaseDebugger()
+        }
+      },
+      { ensureSession: false, requireScopedTarget: true }
+    )
   }
 
   async pdf(worktreeId?: string, browserPageId?: string): Promise<BrowserPdfResult> {
-    // Why: agent-browser's CDP printToPDF hangs in Electron webviews — use the native webContents.printToPDF().
+    // Native printing avoids helper CDP hangs and lays out undrawn pages without a paint hold.
     return this.enqueueTargetedCommand(worktreeId, browserPageId, async (_sessionName, target) => {
       const wc = this.getWebContents(target.webContentsId)
       if (!wc) {
         throw new BrowserError('browser_no_tab', 'Tab is no longer available')
       }
-      const buffer = await wc.printToPDF({
-        printBackground: true,
-        preferCSSPageSize: true
-      })
+      const buffer = await readRemoteCliAdmittedPage(wc.id, () =>
+        wc.printToPDF({ printBackground: true, preferCSSPageSize: true })
+      )
       return { data: buffer.toString('base64') }
     })
   }

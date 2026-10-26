@@ -3,16 +3,19 @@ import type { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import type { AutomationRun } from '../../../../shared/automations-types'
 
+// Reuse one formatter across run cells; per-cell construction dominates large-history rendering.
+const automationDateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit'
+})
+
 export function formatAutomationDateTime(value: number | null | undefined): string {
   if (!value) {
     return 'Never'
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(value)
+  return automationDateTimeFormatter.format(value)
 }
 
 export function formatAutomationRelativeTime(

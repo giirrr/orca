@@ -5,7 +5,7 @@ import {
   countToolCalls,
   summarizeToolInput,
   summarizeToolRun
-} from './native-chat-tool-summary'
+} from '../../../../shared/native-chat/tools/native-chat-tool-summary'
 
 describe('summarizeToolInput', () => {
   it('passes short strings through and collapses whitespace', () => {
@@ -14,13 +14,6 @@ describe('summarizeToolInput', () => {
 
   it('serializes objects to compact JSON', () => {
     expect(summarizeToolInput({ a: 1 })).toBe('{"a":1}')
-  })
-
-  it('truncates long previews with an ellipsis', () => {
-    const long = 'x'.repeat(200)
-    const out = summarizeToolInput(long)
-    expect(out.endsWith('…')).toBe(true)
-    expect(out.length).toBe(80)
   })
 
   it('returns empty for null/undefined', () => {

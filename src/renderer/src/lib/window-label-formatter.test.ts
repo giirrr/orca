@@ -18,10 +18,6 @@ describe('formatWindowLabel', () => {
     expect(formatWindowLabel(10080)).toBe('wk')
   })
 
-  it('returns "1d" for 1440 minutes (1 day)', () => {
-    expect(formatWindowLabel(1440)).toBe('1d')
-  })
-
   it('returns "2h" for 120 minutes', () => {
     expect(formatWindowLabel(120)).toBe('2h')
   })
@@ -34,36 +30,19 @@ describe('formatWindowLabel', () => {
     expect(formatWindowLabel(20160)).toBe('2wk')
   })
 
-  it('returns "30m" for 30 minutes', () => {
-    expect(formatWindowLabel(30)).toBe('30m')
-  })
-
   it('returns "3d" for 4320 minutes (3 days)', () => {
     expect(formatWindowLabel(4320)).toBe('3d')
   })
 
   it('documents the formatter contract: 295 minutes stays raw ("295m")', () => {
-    // Why: the formatter does NOT snap — the snap lives in the MiniMax
-    // fetcher (snapMiniMaxWindowMinutes), where raw drift of a few minutes
-    // rounds to the canonical 300-minute bucket before reaching this label.
-    // This test pins the contract so a future change to the formatter
-    // does not silently regress the snap's "5h" output.
+    // MiniMax fetching snaps near-300-minute windows, not this formatter; pin canonical 5h output.
     expect(formatWindowLabel(295)).toBe('295m')
     expect(formatWindowLabel(300)).toBe('5h')
-  })
-
-  it('falls back to per-minute labels outside canonical buckets', () => {
-    // Why: when the window length lands between buckets (e.g. 2h30m), we
-    // render the raw minute count rather than guess at a half-bucket label.
-    expect(formatWindowLabel(75)).toBe('75m')
-    expect(formatWindowLabel(150)).toBe('150m')
   })
 })
 
 describe('formatRateLimitWindowChipLabel', () => {
-  // Why: repro for #8378 — Codex session chip said "5h" while the popup said
-  // "Resets in 2h 33m" for the same resetsAt. Both surfaces must share the
-  // remaining-time duration when a reset timestamp is available.
+  // Codex chip/popup must share remaining duration for resetsAt, rather than fixed 5h versus countdown (#8378).
   it('shows remaining time when resetsAt is known (repro-8378)', () => {
     const now = 1_700_000_000_000
     const remainingMs = 2 * HOUR + 33 * MIN

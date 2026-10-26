@@ -1,6 +1,7 @@
-import type { TaskPageJiraIssueCreationModel } from './use-task-page-jira-issue-creation'
+import type { TaskPageJiraSummaryGenerationModel } from './use-task-page-jira-summary-generation'
 import { useEffect } from 'react'
-export function useTaskPageGlobalEffects(model: TaskPageJiraIssueCreationModel) {
+import { addAppKeyListener, removeAppKeyListener } from '@/lib/app-keyboard-router'
+export function useTaskPageGlobalEffects(model: TaskPageJiraSummaryGenerationModel) {
   const {
     closeTaskPage,
     activeModal,
@@ -58,7 +59,7 @@ export function useTaskPageGlobalEffects(model: TaskPageJiraIssueCreationModel) 
         return
       }
 
-      // Why: Esc first blurs a focused input so it doesn't accidentally close the whole page; only closes once focus is outside an input.
+      // Esc first blurs input; leave the page only when focus is outside one.
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
@@ -72,13 +73,8 @@ export function useTaskPageGlobalEffects(model: TaskPageJiraIssueCreationModel) 
       event.preventDefault()
       closeTaskPage()
     }
-    window.addEventListener('keydown', onKeyDown, {
-      capture: true
-    })
-    return () =>
-      window.removeEventListener('keydown', onKeyDown, {
-        capture: true
-      })
+    addAppKeyListener('keydown', onKeyDown)
+    return () => removeAppKeyListener('keydown', onKeyDown)
   }, [
     activeModal,
     closeTaskPage,
@@ -114,7 +110,6 @@ export function useTaskPageGlobalEffects(model: TaskPageJiraIssueCreationModel) 
     refreshPreflightStatus
   ])
 
-  // Why: debounce the Linear search input so we don't fire a request per keystroke (300ms, matching GitHub search).
   const nextModel = model as typeof model & {
     githubTasksBusy: typeof githubTasksBusy
   }

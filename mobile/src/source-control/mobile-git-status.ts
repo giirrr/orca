@@ -1,29 +1,28 @@
+import type { GitFileStatus, GitStagingArea } from '../../../src/shared/git-status-types'
+import type { RpcResponse } from '../transport/types'
 import type {
-  GitFileStatus,
-  GitStagingArea,
-  GitStatusEntry,
-  GitStatusResult,
-  GitUpstreamStatus
-} from '../../../src/shared/git-status-types'
+  MobileGitStatusEntry,
+  MobileGitStatusHostPayload,
+  MobileGitUpstreamStatus
+} from './git-status-reply-schema'
 
 export type MobileGitFileStatus = GitFileStatus
 export type MobileGitStagingArea = GitStagingArea
-export type MobileGitStatusEntry = GitStatusEntry
-export type MobileGitUpstreamStatus = GitUpstreamStatus
-export type MobileGitStatusResult = GitStatusResult
+export type { MobileGitStatusEntry, MobileGitUpstreamStatus }
+
+export type MobileGitStatusResult = MobileGitStatusHostPayload
 
 export type MobileSourceControlSection<TEntry extends MobileGitStatusEntry = MobileGitStatusEntry> =
   {
-    area: MobileGitStagingArea
+    area: Exclude<MobileGitStagingArea, 'untracked'>
     title: string
     data: TEntry[]
   }
 
-const AREA_ORDER: MobileGitStagingArea[] = ['unstaged', 'untracked', 'staged']
+const AREA_ORDER = ['unstaged', 'staged'] as const
 
-const AREA_TITLES: Record<MobileGitStagingArea, string> = {
+const AREA_TITLES: Record<MobileSourceControlSection['area'], string> = {
   unstaged: 'Changes',
-  untracked: 'Untracked Files',
   staged: 'Staged Changes'
 }
 
@@ -34,13 +33,6 @@ export const MOBILE_GIT_STATUS_LABELS: Record<MobileGitFileStatus, string> = {
   renamed: 'R',
   untracked: 'U',
   copied: 'C'
-}
-
-function compareGitStatusEntries(a: MobileGitStatusEntry, b: MobileGitStatusEntry): number {
-  return (
-    getConflictSortRank(a) - getConflictSortRank(b) ||
-    a.path.localeCompare(b.path, undefined, { numeric: true })
-  )
 }
 
 function getConflictSortRank(entry: MobileGitStatusEntry): number {
@@ -56,11 +48,23 @@ function getConflictSortRank(entry: MobileGitStatusEntry): number {
 export function buildMobileSourceControlSections<TEntry extends MobileGitStatusEntry>(
   entries: readonly TEntry[]
 ): MobileSourceControlSection<TEntry>[] {
-  return AREA_ORDER.map((area) => ({
+  const sections = AREA_ORDER.map((area) => ({
     area,
     title: AREA_TITLES[area],
-    data: entries.filter((entry) => entry.area === area).sort(compareGitStatusEntries)
+    data: entries.filter(
+      (entry) => entry.area === area || (area === 'unstaged' && entry.area === 'untracked')
+    )
   })).filter((section) => section.data.length > 0)
+  if (sections.some((section) => section.data.length > 1)) {
+    const collator = new Intl.Collator(undefined, { numeric: true })
+    for (const section of sections) {
+      section.data.sort(
+        (a, b) =>
+          getConflictSortRank(a) - getConflictSortRank(b) || collator.compare(a.path, b.path)
+      )
+    }
+  }
+  return sections
 }
 
 export function countStagedEntries(entries: readonly MobileGitStatusEntry[]): number {
@@ -90,10 +94,21 @@ export function isMobileGitDiscardableEntry(entry: MobileGitStatusEntry): boolea
   return entry.conflictStatus !== 'unresolved' && entry.conflictStatus !== 'resolved_locally'
 }
 
-// Why: unresolved conflicts are not a stable file to open. Deletions are —
-// git.diff still returns the pre-delete side (text or image via modifiedDeleted).
+// Unresolved conflicts cannot open as stable files; deletions can still show their pre-delete diff.
 export function canOpenMobileGitStatusEntry(entry: MobileGitStatusEntry): boolean {
   return entry.conflictStatus !== 'unresolved'
+}
+
+// Preserve raw refusal code/message for capability fallback and retry routing before applying acceptance policy.
+export function readMobileGitRefusal(
+  response: RpcResponse
+): { code: string | undefined; message: string | undefined } | null {
+  return response.ok ? null : { code: response.error?.code, message: response.error?.message }
+}
+
+export function isMobileGitUnavailableReply(response: RpcResponse): boolean {
+  const refusal = readMobileGitRefusal(response)
+  return refusal !== null && isMobileGitUnavailable(refusal.code, refusal.message)
 }
 
 export function isMobileGitUnavailable(code: string | undefined, message: string | undefined) {

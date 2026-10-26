@@ -5,6 +5,7 @@ import type { AgentStatusEntry } from '../../../shared/agent-status-types'
 import { isTerminalLeafId, makePaneKey } from '../../../shared/stable-pane-id'
 import { resolveExplicitTerminalTitleAgentType } from '../../../shared/terminal-title-agent-type'
 import type { TerminalLayoutSnapshot } from '../../../shared/terminal-tab-types'
+import type { TerminalAgent } from '../../../shared/terminal-agent'
 import type { TuiAgent } from '../../../shared/tui-agent'
 import {
   resolveFocusedCompletedTabAgent,
@@ -18,11 +19,7 @@ import { resolveTabAgentFromSignals } from './tab-agent-from-signals'
 
 export type OpenTabOccupantAgentInput = {
   tabId: string
-  /**
-   * Resolved unified tab label — the same string the tab strip feeds `useTabAgent`.
-   * The terminal record's own title is not used: it can stay a stale "Terminal N"
-   * while the unified label already carries the live OSC title.
-   */
+  /** Use the resolved tab-strip label, not a terminal record that may retain stale Terminal N while unified OSC text is current. */
   title?: string
   defaultTitle?: string
   launchAgent?: TuiAgent
@@ -33,10 +30,7 @@ export type OpenTabOccupantAgentInput = {
   paneForegroundAgentByPaneKey?: Record<string, PaneForegroundAgentEntry>
 }
 
-/**
- * Search-row occupant: the tab-strip identity function, with the same
- * hook/sibling/sleeping/process inputs `useTabAgent` gathers. No second ladder.
- */
+/** Reuse tab-strip identity with the same hook/sibling/sleeping/process evidence as useTabAgent. */
 export function resolveOpenTabOccupantAgent({
   tabId,
   title,
@@ -47,7 +41,7 @@ export function resolveOpenTabOccupantAgent({
   retainedAgentsByPaneKey,
   sleepingAgentSessionsByPaneKey,
   paneForegroundAgentByPaneKey
-}: OpenTabOccupantAgentInput): TuiAgent | null {
+}: OpenTabOccupantAgentInput): TerminalAgent | null {
   const hookAgent = resolveFocusedTabAgent(agentStatusByPaneKey, layout, tabId)
   const siblingHookAgent = resolveSiblingTabAgent(agentStatusByPaneKey, layout, tabId)
   const focusedCompletedHookAgent =

@@ -1,14 +1,8 @@
 import type { RuntimeWorktreeAgentRow } from '../../../src/shared/runtime-types'
+import type { AgentTurnOutcome } from '../../../src/shared/agent-turn-outcome'
+import { isAgentStatusFresh } from '../../../src/shared/agent-status-freshness'
 
-// Mirrors the desktop AGENT_STATUS_STALE_AFTER_MS (src/shared/agent-status-types.ts:
-// 30 min). Defined locally rather than imported because a runtime-value import
-// from a root .ts breaks mobile's vitest transform (no tsconfig in the
-// mobile-only checkout); root type-only imports stay fine.
-export const AGENT_STATUS_STALE_AFTER_MS = 30 * 60 * 1000
-
-// Mirrors the desktop AgentStateDot vocabulary. The wire `state` is the agent
-// status state; 'blocked'/'waiting' read as attention states, 'done' as
-// complete, everything else idle.
+// Mirror desktop AgentStateDot vocabulary.
 export type AgentDotState =
   | 'working'
   | 'monitoring'
@@ -17,23 +11,72 @@ export type AgentDotState =
   | 'done'
   | 'idle'
   | 'interrupted'
+  | 'failed'
+  | 'unconfirmed'
+
+// A session tab's AgentStatusEntry leaves `interrupted` optional; worktree rows always send it.
+type AgentRowVerdictSource = Pick<RuntimeWorktreeAgentRow, 'state' | 'mainAgent'> & {
+  interrupted?: boolean
+}
+
+// Mirror AGENT_TURN_OUTCOMES; unparsed future host arms yield no verdict.
+const AGENT_TURN_OUTCOMES: readonly AgentTurnOutcome[] = [
+  'success',
+  'failure',
+  'cancellation',
+  'superseded',
+  'interruption',
+  'unconfirmed'
+]
+
+// Mirror desktop verdict accessors; mainAgent remains distinct while subagents keep the row working.
+export function agentRowVerdict(row: AgentRowVerdictSource): AgentTurnOutcome | null {
+  if (row.mainAgent && row.mainAgent.state !== 'done') {
+    return null
+  }
+  const outcome = row.mainAgent?.outcome
+  if (outcome !== undefined) {
+    return AGENT_TURN_OUTCOMES.find((known) => known === outcome) ?? null
+  }
+  return row.state === 'done' && row.interrupted ? 'cancellation' : null
+}
+
+// Faults outrank live state; Stop, superseded and unproven endings mark only rows already done.
+export function agentRowVerdictMark(
+  row: AgentRowVerdictSource
+): 'failed' | 'interrupted' | 'unconfirmed' | null {
+  switch (agentRowVerdict(row)) {
+    case 'failure':
+    case 'interruption':
+      return 'failed'
+    case 'cancellation':
+    case 'superseded':
+      return row.state === 'done' ? 'interrupted' : null
+    case 'unconfirmed':
+      return row.state === 'done' ? 'unconfirmed' : null
+    case 'success':
+    case null:
+      return null
+  }
+}
 
 export function agentDotState(
-  row: Pick<RuntimeWorktreeAgentRow, 'state' | 'workingMode' | 'interrupted' | 'updatedAt'>,
+  row: AgentRowVerdictSource &
+    Pick<RuntimeWorktreeAgentRow, 'workingMode'> &
+    Parameters<typeof isAgentStatusFresh>[0],
   now: number
 ): AgentDotState {
-  if (row.interrupted) {
-    return 'interrupted'
+  const mark = agentRowVerdictMark(row)
+  if (mark) {
+    return mark
   }
   switch (row.state) {
     case 'blocked':
     case 'waiting':
-      // Why: an agent that exits without a final report would otherwise read as
-      // active forever. Decay a stale active state to idle, matching desktop's
-      // renderer-side staleness decay (worktree-agent-rows.ts).
-      return now - row.updatedAt > AGENT_STATUS_STALE_AFTER_MS ? 'idle' : row.state
+      // Decay stale active states like desktop so agents exiting without a report cannot remain active forever.
+      return isAgentStatusFresh(row, now) ? row.state : 'idle'
     case 'working':
-      if (now - row.updatedAt > AGENT_STATUS_STALE_AFTER_MS) {
+      if (!isAgentStatusFresh(row, now)) {
         return 'idle'
       }
       return row.workingMode === 'monitoring' ? 'monitoring' : 'working'
@@ -56,6 +99,10 @@ export function agentStateLabel(state: AgentDotState): string {
       return 'Waiting for input'
     case 'interrupted':
       return 'Interrupted'
+    case 'failed':
+      return 'Failed'
+    case 'unconfirmed':
+      return 'Couldn’t confirm'
     case 'done':
       return 'Done'
     case 'idle':
@@ -63,10 +110,14 @@ export function agentStateLabel(state: AgentDotState): string {
   }
 }
 
-// Primary row text: prefer the agent's last message, then the user prompt, then
-// a human-readable state label so a row is never blank. Matches the desktop
-// DashboardAgentRow displayLabel fallback chain.
+// Mirrors NATIVE_CHAT_TURN_STATUS_COPY.stopping.
+const STOPPING_LABEL = 'Stopping…'
+
+// Match DashboardAgentRow fallback order; a user-requested Stop takes precedence while ending the turn.
 export function agentDisplayLabel(row: RuntimeWorktreeAgentRow, now: number): string {
+  if (row.state === 'working' && row.mainAgent?.stopping === true) {
+    return STOPPING_LABEL
+  }
   const message = row.lastAssistantMessage?.trim()
   if (message) {
     return message
@@ -78,8 +129,6 @@ export function agentDisplayLabel(row: RuntimeWorktreeAgentRow, now: number): st
   return agentStateLabel(agentDotState(row, now))
 }
 
-// Short agent identity label by type (Claude/Codex/Gemini/…), used when no
-// identity icon is available on mobile. Falls back to the first two letters.
 export function agentIdentityLabel(agentType: string | null): string {
   if (!agentType) {
     return ''
@@ -99,7 +148,16 @@ export function agentIdentityLabel(agentType: string | null): string {
   return known[normalized] ?? normalized.slice(0, 2).toUpperCase()
 }
 
-// Relative time, matching desktop formatTimeAgo thresholds (just now / Xm / Xh / Xd).
+// Mirror desktop lastEnteredDoneAt: date main-agent failures independently while subagents remain active.
+export function agentRowTimeAt(
+  row: Pick<RuntimeWorktreeAgentRow, 'state' | 'interrupted' | 'mainAgent' | 'stateStartedAt'>
+): number {
+  if (row.state !== 'done' && row.mainAgent && agentRowVerdictMark(row) === 'failed') {
+    return row.mainAgent.stateStartedAt
+  }
+  return row.stateStartedAt
+}
+
 export function formatTimeAgo(ts: number, now: number): string {
   const delta = now - ts
   if (delta < 60_000) {

@@ -3,9 +3,7 @@ import type { AppState } from '../store/types'
 import { makeAgentStatusEntry, makeState } from './sync-runtime-graph-test-harness'
 import type * as EditorDraftHashModule from './sync-runtime-graph/editor-draft-hash'
 
-// Why the mock: the draft hash is the only per-keystroke cost that scales with file size, so the
-// regression this file guards is "how many characters were hashed", not "how long did it take".
-// Instrumenting the real function through its own module keeps the counter out of shipped code.
+// Count characters hashed, not elapsed time: only draft hashing scales per keystroke. Instrument its module without adding shipped counters.
 const draftHashCounter = { calls: 0, chars: 0 }
 vi.mock('./sync-runtime-graph/editor-draft-hash', async (importOriginal) => {
   const actual = await importOriginal<typeof EditorDraftHashModule>()
@@ -20,20 +18,23 @@ vi.mock('./sync-runtime-graph/editor-draft-hash', async (importOriginal) => {
 
 const { stableHashString } = await import('./sync-runtime-graph/editor-draft-hash')
 const {
+  AGENT_STATUS_SYNC_UPDATED_AT_BUCKET_MS_FOR_TESTS: AGENT_STATUS_SYNC_UPDATED_AT_BUCKET_MS,
   buildRuntimeMobileAgentStatusProjectionForTests,
-  getRuntimeMobileSessionSyncKey,
-  resetRuntimeMobileAgentStatusProjectionCacheForTests,
-  resetRuntimeMobileSyncProjectionCachesForTests,
-  runtimeMobileSessionSyncKeysEqual
-} = await import('./sync-runtime-graph')
+  resetRuntimeMobileAgentStatusProjectionCacheForTests
+} = await import('./sync-runtime-graph/agent-status-projection')
+const { getRuntimeMobileSessionSyncKey, runtimeMobileSessionSyncKeysEqual } =
+  await import('./sync-runtime-graph/sync-key')
 const {
+  resetRuntimeMobileSyncProjectionCachesForTests,
   buildRuntimeMobileBrowserProjection,
   buildRuntimeMobileEditorDraftsProjection,
   buildRuntimeMobileOpenFilesProjection
 } = await import('./sync-runtime-graph/sync-projections')
-const { AGENT_STATUS_SYNC_UPDATED_AT_BUCKET_MS } = await import('./sync-runtime-graph/graph-state')
 
-// ── Reference implementations: the pre-change bodies, kept verbatim ────────────────────
+type MainAgentStatus = AppState['agentStatusByPaneKey'][string]['mainAgent']
+function mainAgentKey(mainAgent: MainAgentStatus) {
+  return mainAgent ? [mainAgent.state, mainAgent.outcome ?? null, mainAgent.stateStartedAt] : null
+}
 
 function referenceEditorDraftsProjection(editorDrafts: AppState['editorDrafts']): string {
   return JSON.stringify(
@@ -54,6 +55,7 @@ function referenceOpenFilesProjection(openFiles: AppState['openFiles']): string 
       mode: file.mode,
       diffSource: file.diffSource,
       isDirty: file.isDirty,
+      mirroredFromRuntimeSession: file.mirroredFromRuntimeSession,
       isUntitled: file.isUntitled,
       deleteUntouchedOnClose: file.deleteUntouchedOnClose,
       markdownPreviewSourceFileId: file.markdownPreviewSourceFileId
@@ -106,20 +108,33 @@ function referenceAgentStatusProjection(map: AppState['agentStatusByPaneKey']): 
         prompt: entry.prompt,
         updatedAtBucket: Math.floor(entry.updatedAt / AGENT_STATUS_SYNC_UPDATED_AT_BUCKET_MS),
         stateStartedAt: entry.stateStartedAt,
+        turnStartedAt: entry.turnStartedAt ?? null,
+        turnEndedAt: entry.turnEndedAt ?? null,
+        turnEndDisposition: entry.turnEndDisposition ?? null,
         agentType: entry.agentType ?? null,
         terminalTitle: entry.terminalTitle ?? null,
         stateHistory: entry.stateHistory.map((history) => ({
           state: history.state,
           prompt: history.prompt,
           startedAt: history.startedAt,
-          interrupted: history.interrupted ?? null
+          interrupted: history.interrupted ?? null,
+          mainAgent: mainAgentKey(history.mainAgent)
         })),
         toolName: entry.toolName ?? null,
         toolInput: entry.toolInput ?? null,
         interactivePrompt: entry.interactivePrompt ?? null,
         lastAssistantMessage: entry.lastAssistantMessage ?? null,
         lastAssistantMessageIsToolOutput: entry.lastAssistantMessageIsToolOutput ?? null,
-        interrupted: entry.interrupted ?? null
+        interrupted: entry.interrupted ?? null,
+        mainAgent: mainAgentKey(entry.mainAgent),
+        programStatus: entry.programStatus
+          ? [
+              entry.programStatus.state,
+              entry.programStatus.kind ?? null,
+              entry.programStatus.progress ?? null,
+              entry.programStatus.message ?? null
+            ]
+          : null
       }))
   )
 }
@@ -132,8 +147,6 @@ function sortedProjectionEntries(projection: string): unknown[] {
     return left < right ? -1 : left > right ? 1 : 0
   })
 }
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────────────
 
 const DRAFT_FILE_COUNT = 5
 const DRAFT_CHARS_PER_FILE = 40_000
@@ -242,12 +255,10 @@ describe('editor draft projection on the typing path', () => {
 
     // Keystroke k has grown file-0 by k characters, so the exact totals are closed form.
     const growth = (typedCharacters * (typedCharacters + 1)) / 2
-    // Before: every keystroke rehashes all five drafts.
     expect(before).toEqual({
       calls: typedCharacters * DRAFT_FILE_COUNT,
       chars: typedCharacters * totalDraftChars + growth
     })
-    // After: one hash of one draft per keystroke.
     expect(after).toEqual({
       calls: typedCharacters,
       chars: typedCharacters * DRAFT_CHARS_PER_FILE + growth
@@ -256,7 +267,7 @@ describe('editor draft projection on the typing path', () => {
   })
 
   it('matches the uncached projection byte for byte across draft shapes', () => {
-    const shapes: Record<string, string>[] = [
+    const draftCases: Record<string, string>[] = [
       {},
       { 'file-a': '' },
       { 'file-a': 'hello' },
@@ -267,10 +278,10 @@ describe('editor draft projection on the typing path', () => {
       { 'file-a': 'hello', 'file-b': 'world', 'file-c': 'third' },
       { 'file-a': 'HELLO', 'file-c': 'third' }
     ]
-    for (const [index, shape] of shapes.entries()) {
-      expect({ index, projection: buildRuntimeMobileEditorDraftsProjection(shape) }).toEqual({
+    for (const [index, draft] of draftCases.entries()) {
+      expect({ index, projection: buildRuntimeMobileEditorDraftsProjection(draft) }).toEqual({
         index,
-        projection: referenceEditorDraftsProjection(shape)
+        projection: referenceEditorDraftsProjection(draft)
       })
     }
   })
@@ -278,9 +289,7 @@ describe('editor draft projection on the typing path', () => {
 
 describe('agent-status projection sort', () => {
   it('constructs no ICU collator, and keeps the same entries as the localeCompare order', () => {
-    // MAX_LIVE_AGENT_STATUSES — the cap a busy session actually reaches. Real pane keys are
-    // `<uuid tab id>:<uuid leaf id>`, so model them as unordered hex rather than a sorted
-    // `tab-<n>` run that would let TimSort skip most comparisons.
+    // Use unordered realistic UUID pane keys at MAX_LIVE_AGENT_STATUSES; sorted tab-N fixtures let TimSort skip the workload.
     let seed = 0x2f6e2b1
     const nextHex = (): string => {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff
@@ -310,7 +319,6 @@ describe('agent-status projection sort', () => {
       // `mockRestore` clears the recorded calls, so read the counts first.
       localeCompareSpy.mockRestore()
     }
-    // Before: thousands of ICU collator comparisons for a single ping.
     expect(beforeCalls).toBeGreaterThan(3000)
     expect(afterCalls).toBe(0)
 
@@ -402,9 +410,10 @@ describe('open-files and browser projections', () => {
   })
 
   it('matches the uncached projections byte for byte across shapes', () => {
-    const openFileShapes: AppState['openFiles'][] = [
+    const openFileCases: AppState['openFiles'][] = [
       [] as unknown as AppState['openFiles'],
       [makeOpenFile(0)] as unknown as AppState['openFiles'],
+      [makeOpenFile(0, { mirroredFromRuntimeSession: true })],
       [makeOpenFile(0, { isDirty: true })] as unknown as AppState['openFiles'],
       [
         makeOpenFile(0, { isDirty: true, diffSource: 'working' }),
@@ -412,14 +421,14 @@ describe('open-files and browser projections', () => {
         makeOpenFile(2, { isUntitled: true, deleteUntouchedOnClose: true, language: undefined })
       ] as unknown as AppState['openFiles']
     ]
-    for (const [index, shape] of openFileShapes.entries()) {
-      expect({ index, projection: buildRuntimeMobileOpenFilesProjection(shape) }).toEqual({
+    for (const [index, openFiles] of openFileCases.entries()) {
+      expect({ index, projection: buildRuntimeMobileOpenFilesProjection(openFiles) }).toEqual({
         index,
-        projection: referenceOpenFilesProjection(shape)
+        projection: referenceOpenFilesProjection(openFiles)
       })
     }
 
-    const browserShapes: AppState[] = [
+    const browserCases: AppState[] = [
       makeState({}),
       makeState({ browserTabsByWorktree: { 'wt-1': [makeBrowserWorkspace(0)] } as never }),
       makeState({
@@ -437,10 +446,10 @@ describe('open-files and browser projections', () => {
         browserPagesByWorkspace: { 'ws-9': [makeBrowserPage(9, { url: 'a"b\\c' })] } as never
       })
     ]
-    for (const [index, shape] of browserShapes.entries()) {
-      expect({ index, projection: buildRuntimeMobileBrowserProjection(shape) }).toEqual({
+    for (const [index, state] of browserCases.entries()) {
+      expect({ index, projection: buildRuntimeMobileBrowserProjection(state) }).toEqual({
         index,
-        projection: referenceBrowserProjection(shape)
+        projection: referenceBrowserProjection(state)
       })
     }
   })

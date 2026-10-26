@@ -15,7 +15,6 @@ export function buildWindowApi(args: {
   getSnapshot?: () => Promise<AgentStatusSetData[]>
   getMigrationUnsupportedSnapshot?: () => Promise<MigrationUnsupportedPtyEntry[]>
   drop?: (paneKey: string) => void
-  remoteWorkspace?: Record<string, unknown>
   runtime?: Record<string, unknown>
   ssh?: Record<string, unknown>
   ui?: Record<string, unknown>
@@ -48,6 +47,9 @@ export function buildWindowApi(args: {
         onActivateWorktree: () => () => {},
         onCreateTerminal: () => () => {},
         onRequestTerminalCreate: () => () => {},
+        onPublishAgentLaunchTab: () => () => {},
+        onRevealTerminalPane: () => () => {},
+        onAgentLaunchPaneVerdict: () => () => {},
         onRequestTerminalTabMount: () => () => {},
         replyTerminalCreate: () => {},
         onSplitTerminal: () => () => {},
@@ -61,24 +63,20 @@ export function buildWindowApi(args: {
         onOpenFileFromMobile: () => () => {},
         onOpenDiffFromMobile: () => () => {},
         onCloseTerminal: () => () => {},
-        onSleepWorktree: () => () => {},
+        onWorkspaceSleep: () => () => {},
         onResumeSleepingAgents: () => () => {},
-        onNewBrowserTab: () => () => {},
-        onNewMarkdownTab: () => () => {},
         onRequestTabCreate: () => () => {},
+        onRequestRemoteCliBrowserScope: () => () => {},
         replyTabCreate: () => {},
         onRequestTabClose: () => () => {},
         replyTabClose: () => {},
         onRequestTabSetProfile: () => () => {},
         replyTabSetProfile: () => {},
-        onNewTerminalTab: () => () => {},
         onCloseActiveTab: () => () => {},
         onCloseFloatingItem: () => () => {},
         onSelectFloatingIndex: () => () => {},
-        onSwitchTab: () => () => {},
-        onSwitchTabAcrossAllTypes: () => () => {},
+        onBrowserPageTabShortcut: () => () => {},
         onSwitchRecentTab: () => () => {},
-        onSwitchTerminalTab: () => () => {},
         onToggleStatusBar: () => () => {},
         onFullscreenChanged: () => () => {},
         onTerminalZoom: () => () => {},
@@ -96,6 +94,7 @@ export function buildWindowApi(args: {
         onGuestLoadFailed: () => () => {},
         onPaneFocus: () => () => {},
         onOpenLinkInOrcaTab: () => () => {},
+        onSessionProfilesChanged: () => () => {},
         onNavigationUpdate: () => () => {},
         onActivateView: () => () => {}
       },
@@ -118,6 +117,7 @@ export function buildWindowApi(args: {
         listTargets: () => Promise.resolve([]),
         listRemovedTargetLabels: () => Promise.resolve({}),
         listPortForwards: () => Promise.resolve([]),
+        listUnrestoredPortForwards: () => Promise.resolve([]),
         listDetectedPorts: () => Promise.resolve([]),
         getState: () => Promise.resolve(null),
         onStateChanged: () => () => {},
@@ -127,6 +127,7 @@ export function buildWindowApi(args: {
         onDetectedPortsChanged: () => () => {},
         ...args.ssh
       },
+      notifications: { dispatch: vi.fn(async () => ({ delivered: false })) },
       agentStatus: {
         onSet: args.onSet,
         onClear: args.onClear ?? vi.fn(() => () => {}),
@@ -137,8 +138,7 @@ export function buildWindowApi(args: {
           ? { getMigrationUnsupportedSnapshot: args.getMigrationUnsupportedSnapshot }
           : {}),
         drop: args.drop ?? vi.fn()
-      },
-      remoteWorkspace: args.remoteWorkspace
+      }
     }
   }
 }

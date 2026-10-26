@@ -18,7 +18,8 @@ import {
   type CollectSleepingAgentSessionRecordsOptions
 } from './agent-status-sleeping-records'
 import { getLaunchConfigForEntry } from './agent-status-launch-config'
-import { isCompletedPiCompatibleAgentWithLiveRecoveryRecord } from '@/lib/live-resume-anchor-record'
+import { agentTurnEndedOnPurpose } from '../../../../shared/agent-main-agent-verdict'
+import { isCompletedPiCompatibleAgentWithLiveRecoveryRecord } from '../../../../shared/live-resume-anchor-record'
 
 export function collectSleepingAgentSessionRecordsForWorktree(
   state: AppState,
@@ -31,8 +32,7 @@ export function collectSleepingAgentSessionRecordsForWorktree(
   const isManualWorktreeSleep = collectOptions.captureMode === 'manual-worktree-sleep'
   const isCompletedAgentHibernation = collectOptions.captureMode === 'completed-agent-hibernation'
   const isWorktreeOwnedCapture = isManualWorktreeSleep || isCompletedAgentHibernation
-  // Why: hibernated completions are intentional worktree-owned records; wake treats
-  // originless completed records as ambiguous legacy captures.
+  // Completed hibernation is worktree-owned; wake treats originless completions as ambiguous legacy captures.
   const origin: SleepingAgentSessionRecord['origin'] | undefined = isWorktreeOwnedCapture
     ? 'worktree-sleep'
     : undefined
@@ -53,8 +53,7 @@ export function collectSleepingAgentSessionRecordsForWorktree(
       ) {
         continue
       }
-      // Why: Pi identity is resumable with no turn row and while idle after done, so manual
-      // sleep must promote both instead of deleting the checkpoint.
+      // Pi resumes without turn status and while done/idle; manual sleep must promote these checkpoints too.
       records[existing.paneKey] = {
         ...existing,
         state: 'working',
@@ -76,8 +75,7 @@ export function collectSleepingAgentSessionRecordsForWorktree(
     if (retained.worktreeId !== worktreeId) {
       continue
     }
-    // Why: the promoted checkpoint carries recovery identity (transcript, connection) a retained
-    // turn row lacks, so it must not be overwritten by a re-derived record.
+    // Promoted checkpoint owns transcript/connection recovery identity; turn rows must not rederive over it.
     if (promotedLiveRecoveryPaneKeys.has(retained.entry.paneKey)) {
       continue
     }
@@ -104,8 +102,7 @@ export function collectSleepingAgentSessionRecordsForWorktree(
     if (allowedPaneKeys && !allowedPaneKeys.has(paneKey)) {
       continue
     }
-    // Why: the promoted checkpoint carries recovery identity (transcript, connection) the live
-    // turn row lacks, so it must not be overwritten by a re-derived record.
+    // Promoted checkpoint owns transcript/connection recovery identity; turn rows must not rederive over it.
     if (promotedLiveRecoveryPaneKeys.has(paneKey)) {
       continue
     }
@@ -153,7 +150,7 @@ export function collectHibernatedCompletionEvidenceForWorktree(
       !allowedPaneKeys.has(paneKey) ||
       entry.state !== 'done' ||
       agentType === undefined ||
-      entry.interrupted === true
+      agentTurnEndedOnPurpose(entry)
     ) {
       continue
     }

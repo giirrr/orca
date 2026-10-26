@@ -1,9 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import {
-  scrapeScrollbackToMessages,
-  scrapeNativeChatSession,
-  stripScrollbackAnsi
-} from './native-chat-scrape-fallback'
+import { scrapeScrollbackToMessages, stripScrollbackAnsi } from './native-chat-scrape-fallback'
 
 const ESC = String.fromCharCode(27)
 
@@ -22,12 +18,10 @@ describe('scrapeScrollbackToMessages', () => {
     for (const message of messages) {
       for (const block of message.blocks) {
         if (block.type === 'text') {
-          // ANSI is gone — no raw escape character survives.
           expect(block.text).not.toContain(ESC)
         }
       }
     }
-    // Order is preserved from the scrollback.
     expect(messages[0].id).toBe('scrape-0')
     expect(messages[1].id).toBe('scrape-1')
   })
@@ -58,9 +52,7 @@ describe('scrapeScrollbackToMessages', () => {
 
     const messages = scrapeScrollbackToMessages(raw)
 
-    // First segment starts with a shell prompt marker -> user.
     expect(messages[0].role).toBe('user')
-    // Plain output -> assistant.
     expect(messages[1].role).toBe('assistant')
   })
 })
@@ -69,26 +61,5 @@ describe('stripScrollbackAnsi', () => {
   it('removes escape sequences and normalizes carriage returns', () => {
     const raw = `${ESC}[31mred\r\nnext`
     expect(stripScrollbackAnsi(raw)).toBe('red\nnext')
-  })
-})
-
-describe('scrapeNativeChatSession', () => {
-  it('builds a ready, approximate session from non-empty scrollback', () => {
-    const { session, isApproximate } = scrapeNativeChatSession('$ ls\n\noutput here', 'claude')
-
-    expect(isApproximate).toBe(true)
-    expect(session.status).toBe('ready')
-    expect(session.sessionId).toBeNull()
-    expect(session.agent).toBe('claude')
-    expect(session.messages.length).toBeGreaterThan(0)
-    expect(session.messages.every((message) => message.source === 'scrape')).toBe(true)
-  })
-
-  it('builds an empty session from blank scrollback', () => {
-    const { session, isApproximate } = scrapeNativeChatSession('   \n  ', 'claude')
-
-    expect(isApproximate).toBe(true)
-    expect(session.status).toBe('empty')
-    expect(session.messages).toEqual([])
   })
 })

@@ -14,8 +14,11 @@ import {
   createBrowserPageGuestRecovery,
   type BrowserPageGuestRecovery
 } from './browser-page-guest-recovery'
-import { browserPageZoomLevelToPercent, setBrowserPageZoomLevel } from './browser-page-zoom'
-import { registeredWebContentsIds, replacePersistentWebview } from './webview-registry'
+import {
+  registeredWebContentsIds,
+  replacePersistentWebview,
+  webviewRegistry
+} from './webview-registry'
 import { browserPageExists } from '../describe-page/browser-page-load-error'
 import type {
   BrowserPageRecoveryNavigationValidation,
@@ -36,11 +39,9 @@ export type BrowserPageWebviewGuestSessionArgs = {
   activeLoadFailureRef: MutableRefObject<BrowserLoadError | null>
   recoveryNavigationValidationRef: MutableRefObject<BrowserPageRecoveryNavigationValidation | null>
   keepAddressBarFocusRef: MutableRefObject<boolean>
-  paneZoomLevelRef: MutableRefObject<number>
   viewportPresetIdRef: MutableRefObject<BrowserViewportPresetId | null>
   onUpdatePageStateRef: MutableRefObject<(tabId: string, updates: BrowserTabPageState) => void>
   setGuestRecoveryGeneration: Dispatch<SetStateAction<number>>
-  setBrowserZoomPercent: Dispatch<SetStateAction<number>>
   focusAddressBarNow: () => boolean
   syncNavigationState: (webview: Electron.WebviewTag) => void
   syncBrowserAnnotationViewportBridge: () => void
@@ -67,11 +68,9 @@ export function createBrowserPageWebviewGuestSession({
   activeLoadFailureRef,
   recoveryNavigationValidationRef,
   keepAddressBarFocusRef,
-  paneZoomLevelRef,
   viewportPresetIdRef,
   onUpdatePageStateRef,
   setGuestRecoveryGeneration,
-  setBrowserZoomPercent,
   focusAddressBarNow,
   syncNavigationState,
   syncBrowserAnnotationViewportBridge
@@ -80,11 +79,21 @@ export function createBrowserPageWebviewGuestSession({
     webContentsId: number
     promise: Promise<boolean | null>
   } | null = null
-  const registerGuest = (): Promise<boolean | null> => {
-    let webContentsId: number
+  const readWebContentsId = (): number | null => {
     try {
-      webContentsId = webview.getWebContentsId()
+      return webview.getWebContentsId()
     } catch {
+      return null
+    }
+  }
+  const ownsGuest = (webContentsId: number | null): boolean =>
+    webContentsId !== null &&
+    !guestRecovery.isDisposed() &&
+    webviewRef.current === webview &&
+    webviewRegistry.get(browserTabId) === webview &&
+    readWebContentsId() === webContentsId
+  const registerGuest = (webContentsId: number | null): Promise<boolean | null> => {
+    if (webContentsId === null || !ownsGuest(webContentsId)) {
       return Promise.resolve(null)
     }
     if (registrationInFlight?.webContentsId === webContentsId) {
@@ -99,6 +108,9 @@ export function createBrowserPageWebviewGuestSession({
         webContentsId
       })
       .then((registered) => {
+        if (!ownsGuest(webContentsId)) {
+          return null
+        }
         if (registered) {
           registeredWebContentsIds.set(browserTabId, webContentsId)
           return true
@@ -146,22 +158,26 @@ export function createBrowserPageWebviewGuestSession({
         return null
       }
       if (registeredWebContentsIds.get(browserTabId) !== webContentsId) {
-        return registerGuest()
+        return registerGuest(webContentsId)
       }
       const registered = await window.api.browser.isGuestRegistered({
         browserPageId: browserTabId,
         webContentsId
       })
+      if (!ownsGuest(webContentsId)) {
+        return null
+      }
       if (registered) {
         return true
       }
-      return window.api.browser.repairGuestRegistration({
+      const repaired = await window.api.browser.repairGuestRegistration({
         browserPageId: browserTabId,
         workspaceId,
         worktreeId,
         sessionProfileId,
         webContentsId
       })
+      return ownsGuest(webContentsId) ? repaired : null
     },
     replaceGuest: () => replacePersistentWebview(browserTabId),
     onReplacementReady: () => setGuestRecoveryGeneration((generation) => generation + 1),
@@ -184,7 +200,11 @@ export function createBrowserPageWebviewGuestSession({
 
   const handleDidAttach = (): void => {
     // Why: register at attach since cert failures can precede dom-ready; the dom-ready path stays an idempotent fallback.
-    void registerGuest().then((registered) => {
+    const webContentsId = readWebContentsId()
+    void registerGuest(webContentsId).then((registered) => {
+      if (!ownsGuest(webContentsId)) {
+        return
+      }
       if (registered === true) {
         guestRecovery.confirmRegistration()
       }
@@ -207,7 +227,10 @@ export function createBrowserPageWebviewGuestSession({
     const queuedAnnotationViewportBridgeSync =
       liveWebContentsId === null || registeredWebContentsIds.get(browserTabId) !== liveWebContentsId
     if (queuedAnnotationViewportBridgeSync) {
-      void registerGuest().then((registered) => {
+      void registerGuest(liveWebContentsId).then((registered) => {
+        if (!ownsGuest(liveWebContentsId)) {
+          return
+        }
         const completedRecovery = guestRecovery.finish()
         if (registered === true) {
           guestRecovery.confirmRegistration()
@@ -231,13 +254,6 @@ export function createBrowserPageWebviewGuestSession({
     if (!queuedAnnotationViewportBridgeSync) {
       syncBrowserAnnotationViewportBridge()
     }
-    // Why: Chromium restores per-origin zoom on reload/navigation, so reassert THIS pane's level after
-    // every guest load. Uses the pane-local level, not the shared setting, so reloading one tab never
-    // adopts a zoom the user applied to a different tab.
-    const appliedLevel = setBrowserPageZoomLevel(webview, paneZoomLevelRef.current)
-    if (appliedLevel !== null) {
-      setBrowserZoomPercent(browserPageZoomLevelToPercent(appliedLevel))
-    }
     // Why: CDP viewport overrides are scoped to the debugger session and don't survive cross-origin nav, so reapply (idempotently) on dom-ready.
     const presetId = viewportPresetIdRef.current
     const preset = getBrowserViewportPreset(presetId)
@@ -249,8 +265,7 @@ export function createBrowserPageWebviewGuestSession({
   }
 
   const handleGuestDestroyed = (): void => {
-    // Why: a guest can be destroyed without render-process-gone (detach/reattach race,
-    // guest-side close). Skip intentional teardown, where the element already left the DOM.
+    // Guest close or detach races can destroy without render-process-gone; recover only while still connected, excluding intentional teardown.
     if (webview.isConnected) {
       guestRecovery.recoverRenderer()
     }

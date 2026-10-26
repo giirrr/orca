@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { NativeChatMessage } from '../../../src/shared/native-chat-types'
 import { useMobileNativeChatDrafts } from './use-mobile-native-chat-drafts'
+import { resetMobileNativeChatDraftStoreForTests } from './mobile-native-chat-draft-store'
 
 type DraftState = ReturnType<typeof useMobileNativeChatDrafts>
 
@@ -32,6 +33,7 @@ describe('useMobileNativeChatDrafts', () => {
 
   afterEach(() => {
     act(() => renderer?.unmount())
+    resetMobileNativeChatDraftStoreForTests()
     renderer = null
     state = null
   })
@@ -103,18 +105,6 @@ describe('useMobileNativeChatDrafts', () => {
     expect(state?.pending.map((pending) => pending.text)).toEqual(['from a'])
   })
 
-  it('clears the composer at send time, before the RPC settles', async () => {
-    await mount('a')
-    act(() => state?.setComposerText('ping'))
-    const origin = state?.captureSendOrigin('ping')
-    act(() => {
-      if (origin) {
-        state?.clearDraftForSend(origin, 'ping')
-      }
-    })
-    expect(state?.composerText).toBe('')
-  })
-
   it('tracks every composer mutation with a stable route-owned generation', async () => {
     await mount('a')
     const getter = state!.getComposerEditGeneration
@@ -142,7 +132,7 @@ describe('useMobileNativeChatDrafts', () => {
     expect(state?.composerText).toBe('ping')
   })
 
-  it('does not clobber newer edits when restoring a rejected send', async () => {
+  it('appends a rejected send after edits typed while it was in flight', async () => {
     await mount('a')
     act(() => state?.setComposerText('ping'))
     const origin = state?.captureSendOrigin('ping')
@@ -157,10 +147,10 @@ describe('useMobileNativeChatDrafts', () => {
         state?.restoreRejectedDraft(origin, 'ping')
       }
     })
-    expect(state?.composerText).toBe('newer edit')
+    expect(state?.composerText).toBe('newer edit\n\nping')
   })
 
-  it('preserves an intentional clear after a newer edit while a rejection is pending', async () => {
+  it('returns a rejected send even after a newer edit was cleared', async () => {
     await mount('a')
     act(() => state?.setComposerText('ping'))
     const origin = state?.captureSendOrigin('ping')
@@ -177,7 +167,7 @@ describe('useMobileNativeChatDrafts', () => {
       }
     })
 
-    expect(state?.composerText).toBe('')
+    expect(state?.composerText).toBe('ping')
   })
 
   it('restores a rejected send onto its originating tab only', async () => {
@@ -217,9 +207,10 @@ describe('useMobileNativeChatDrafts', () => {
       })
       expect(state?.composerText).toBe('')
 
-      // A relay drop can stall the transcript stream past the deadline; the
-      // delivered prompt must not reappear in the composer when it recovers.
-      act(() => vi.advanceTimersByTime(25_000))
+      // Transcript recovery after a lost ack must not restore a delivered prompt as draft text.
+      act(() => {
+        vi.advanceTimersByTime(25_000)
+      })
       await act(async () =>
         renderer?.update(
           createElement(Harness, { tabId: 'a', messages: [userTextMessage('m1', 'ping')] })
@@ -263,10 +254,8 @@ describe('useMobileNativeChatDrafts', () => {
         state?.acceptSend(origin, '', ['file:///a.jpg'])
       }
     })
-    // The echo carries the preview thumbnail and has no text to match against.
     expect(state?.pending.map((pending) => pending.images)).toEqual([['file:///a.jpg']])
 
-    // An agent reply grows the transcript but must NOT clear the photo echo early.
     await act(async () =>
       renderer?.update(
         createElement(Harness, {
@@ -277,8 +266,6 @@ describe('useMobileNativeChatDrafts', () => {
     )
     expect(state?.pending.map((pending) => pending.images)).toEqual([['file:///a.jpg']])
 
-    // The user's own image echo landing (Claude records it as an
-    // `[Image: source: …]` turn) clears it.
     await act(async () =>
       renderer?.update(
         createElement(Harness, {
@@ -312,8 +299,6 @@ describe('useMobileNativeChatDrafts', () => {
     })
     expect(state?.pending).toHaveLength(2)
 
-    // The text echo lands first: it must clear only the text pending — a user
-    // turn that is not an image echo cannot reconcile the photo.
     await act(async () =>
       renderer?.update(
         createElement(Harness, {
@@ -354,8 +339,6 @@ describe('useMobileNativeChatDrafts', () => {
     })
     expect(state?.pending).toHaveLength(1)
 
-    // Claude echoes a captioned image send as a source turn plus a caption
-    // carrying `[Image #1]`; the pending must still match.
     await act(async () =>
       renderer?.update(
         createElement(Harness, {
@@ -510,7 +493,9 @@ describe('useMobileNativeChatDrafts', () => {
         )
       )
 
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -526,7 +511,6 @@ describe('useMobileNativeChatDrafts', () => {
           createElement(Harness, { tabId: 'a', messages: [assistantTextMessage('a1', 'hi')] })
         )
       )
-      // Image-only send: empty text, so it can only reconcile against a new user turn.
       const origin = state?.captureSendOrigin('')
       const onUnconfirmed = vi.fn()
       act(() => {
@@ -535,7 +519,6 @@ describe('useMobileNativeChatDrafts', () => {
         }
       })
 
-      // An agent reply must not confirm it...
       await act(async () =>
         renderer?.update(
           createElement(Harness, {
@@ -544,7 +527,6 @@ describe('useMobileNativeChatDrafts', () => {
           })
         )
       )
-      // ...but the user's own turn landing does, so the deadline never warns.
       await act(async () =>
         renderer?.update(
           createElement(Harness, {
@@ -557,7 +539,9 @@ describe('useMobileNativeChatDrafts', () => {
           })
         )
       )
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -580,7 +564,6 @@ describe('useMobileNativeChatDrafts', () => {
     })
     expect(state?.pending).toHaveLength(2)
 
-    // Only one image echo has landed — exactly one photo reconciles.
     await act(async () =>
       renderer?.update(
         createElement(Harness, {
@@ -614,7 +597,9 @@ describe('useMobileNativeChatDrafts', () => {
       })
 
       expect(vi.getTimerCount()).toBe(0)
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -633,9 +618,13 @@ describe('useMobileNativeChatDrafts', () => {
         }
       })
 
-      act(() => vi.advanceTimersByTime(19_999))
+      act(() => {
+        vi.advanceTimersByTime(19_999)
+      })
       expect(onUnconfirmed).not.toHaveBeenCalled()
-      act(() => vi.advanceTimersByTime(1))
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
       expect(onUnconfirmed).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
@@ -670,7 +659,9 @@ describe('useMobileNativeChatDrafts', () => {
       )
       expect(state?.composerText).toBe('ping')
 
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
@@ -704,7 +695,9 @@ describe('useMobileNativeChatDrafts', () => {
       )
       expect(state?.composerText).toBe('ping')
 
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
@@ -731,7 +724,9 @@ describe('useMobileNativeChatDrafts', () => {
           createElement(Harness, { tabId: 'a', messages: [userTextMessage('echo-1', 'ping')] })
         )
       )
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
 
       expect(firstUnconfirmed).not.toHaveBeenCalled()
       expect(secondUnconfirmed).toHaveBeenCalledTimes(1)
@@ -757,7 +752,9 @@ describe('useMobileNativeChatDrafts', () => {
       })
 
       expect(vi.getTimerCount()).toBe(0)
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -807,7 +804,9 @@ describe('useMobileNativeChatDrafts', () => {
       )
 
       expect(state?.composerText).toBe('ping')
-      act(() => vi.advanceTimersByTime(30_000))
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
       expect(onUnconfirmed).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()

@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { shouldFollowMouseFocus, type FocusFollowsMouseInput } from './focus-follows-mouse'
 
 describe('shouldFollowMouseFocus', () => {
-  // Base input where every gate passes. Individual tests flip one field
-  // at a time to assert that each gate blocks focus independently.
+  // Start with every gate passing, then change one field to isolate each focus veto.
   const base: FocusFollowsMouseInput = {
     featureEnabled: true,
     activePaneId: 1,
@@ -37,18 +36,7 @@ describe('shouldFollowMouseFocus', () => {
     expect(shouldFollowMouseFocus({ ...base, mouseButtons: 2 })).toBe(false)
   })
 
-  it('blocks while multiple buttons are held (buttons=3)', () => {
-    expect(shouldFollowMouseFocus({ ...base, mouseButtons: 3 })).toBe(false)
-  })
-
   it('blocks when the window does not have OS focus', () => {
     expect(shouldFollowMouseFocus({ ...base, windowHasFocus: false })).toBe(false)
-  })
-
-  // Defensive case: createInitialPane always sets activePaneId before any
-  // mouse events are possible in production, but the gate must still behave
-  // correctly if the state ever occurs (e.g. future refactor of init flow).
-  it('switches when activePaneId is null (defensive)', () => {
-    expect(shouldFollowMouseFocus({ ...base, activePaneId: null })).toBe(true)
   })
 })

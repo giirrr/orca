@@ -1,12 +1,12 @@
 import { useCallback, useLayoutEffect, useRef, type MutableRefObject } from 'react'
-import { useRouter } from 'expo-router'
+import { useWorkspaceRouteHandoff } from '../navigation/workspace-route-handoff'
 import { triggerSelection } from '../platform/haptics'
-import type { RpcClient } from '../transport/rpc-client'
 import { openMobileFileTap, type FileTapSessionTab } from './mobile-file-tap-open'
 import { openMobileNativeChatFileTap } from './mobile-native-chat-open-file'
+import type { RpcOperationSender } from '../transport/rpc-operation-sender'
 
 type MobileFileTapHandlerOptions<T extends FileTapSessionTab> = {
-  client: Pick<RpcClient, 'sendRequest'> | null
+  client: RpcOperationSender | null
   hostId: string
   worktreeId: string
   worktreeName?: string
@@ -23,13 +23,7 @@ type MobileFileTapHandlerOptions<T extends FileTapSessionTab> = {
   reportChatTapFailure: (message: string) => void
 }
 
-/**
- * Tap-to-open handlers for file references, shared by the terminal (link taps
- * with the terminal's cwd) and native chat (worktree-root-relative paths, with
- * failure feedback). Handlers are identity-stable and read the latest options at
- * dispatch time; the shared activation seq lets a newer tap on either surface
- * supersede an in-flight one.
- */
+// Share stable dispatch-time handlers and activation sequence so newer terminal/chat file taps supersede in-flight opens.
 export function useMobileFileTapHandlers<T extends FileTapSessionTab>(
   options: MobileFileTapHandlerOptions<T>
 ): {
@@ -58,7 +52,7 @@ export function useMobileFileTapHandlers<T extends FileTapSessionTab>(
     worktreeId,
     worktreeName
   } = options
-  const router = useRouter()
+  const router = useWorkspaceRouteHandoff()
   const routerRef = useRef(router)
   const optionsRef = useRef(options)
   const activationSeqRef = useRef(0)

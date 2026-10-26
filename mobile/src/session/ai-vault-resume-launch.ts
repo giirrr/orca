@@ -6,7 +6,11 @@ import {
 } from '../../../src/shared/ai-vault-resume-command'
 import { RESUME_RPC_TIMEOUT_MS } from './ai-vault-resume-preparation'
 import { isResumableTuiAgent } from '../../../src/shared/agent-session-resume'
-import type { SleepingAgentLaunchConfig } from '../../../src/shared/agent-session-resume'
+import type {
+  AgentProviderSessionMetadata,
+  SleepingAgentLaunchConfig
+} from '../../../src/shared/agent-session-resume'
+import { getAiVaultAgentProviderSession } from '../../../src/shared/ai-vault-resume-startup'
 import { buildAgentResumeStartupPlan } from '../../../src/shared/tui-agent-startup'
 import {
   resolveTuiAgentLaunchArgs,
@@ -16,13 +20,22 @@ import { normalizeAiVaultResumeFilePath } from '../../../src/shared/ai-vault-res
 import type { TuiAgent } from '../../../src/shared/tui-agent'
 import { parseWslUncPath } from '../../../src/shared/wsl-paths'
 import { resolveWindowsShellStartupFamily } from '../../../src/shared/windows-terminal-shell'
-import type { RpcClient } from '../transport/rpc-client'
-import {
-  readMobileReviewCreatedTerminal,
-  readMobileReviewTerminalSendAccepted,
-  type MobileReviewTerminalTab
-} from './mobile-diff-review-rpc'
+import type { RpcOperationSender } from '../transport/rpc-operation-sender'
+import { interpretOrThrowRefusalMessage } from '../transport/rpc-refusal-message'
+import { reviewTerminalCreateRun, reviewTerminalSendRun } from './mobile-review-terminal-operations'
+import type { MobileReviewTerminalTab } from './review-terminal-reply-schema'
 import type { MobileAiVaultResumeTargetStatus } from '../agent-history/agent-history-resume-target'
+import { QODER_OWNED_TERMINAL_CREATE_CAPABILITY } from '../../../src/shared/qoder-terminal-create-capability'
+import { agentHistoryHostStatusSchema } from '../agent-history/agent-history-reply-schema'
+import { readMobileRuntimeHostPlatform } from '../transport/mobile-runtime-host-platform'
+
+export function readMobileAiVaultResumeHost(statusResult: unknown) {
+  const status = agentHistoryHostStatusSchema.safeParse(statusResult)
+  return {
+    platform: readMobileRuntimeHostPlatform(statusResult),
+    capabilities: status.success ? status.data.capabilities : undefined
+  }
+}
 
 export function buildMobileAiVaultResumeCommand(args: {
   session: Pick<AiVaultSession, 'agent' | 'sessionId' | 'cwd' | 'codexHome'> &
@@ -63,6 +76,7 @@ export type MobileAiVaultResumeLaunch = {
   envToDelete?: string[]
   launchConfig?: SleepingAgentLaunchConfig
   launchAgent?: TuiAgent
+  resumeProviderSession?: AgentProviderSessionMetadata
 }
 
 export function buildMobileAiVaultResumeLaunch(args: {
@@ -89,13 +103,17 @@ export function buildMobileAiVaultResumeLaunch(args: {
       cmdOverrides,
       platform: args.hostPlatform,
       shell,
-      agentArgs: resolveTuiAgentLaunchArgs(args.session.agent, args.settings?.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(args.session.agent, args.settings?.agentDefaultEnv),
+      agentArgs: resolveTuiAgentLaunchArgs(args.session.agent, args.settings),
+      agentEnv: resolveTuiAgentLaunchEnv(args.session.agent, args.settings, args.hostPlatform),
       ...(args.session.agent === 'omp' && resumeFilePath
         ? { ompResumeFilePath: resumeFilePath }
         : {})
     })
     if (startupPlan) {
+      const resumeProviderSession = getAiVaultAgentProviderSession({
+        ...args.session,
+        ...(resumeFilePath ? { filePath: resumeFilePath } : {})
+      })
       return {
         command:
           args.session.agent === 'omp'
@@ -120,7 +138,8 @@ export function buildMobileAiVaultResumeLaunch(args: {
         // real-home override must strip Codex homes at pane spawn like desktop.
         ...realHomeCodexResumeEnvDeletion(args.session),
         launchConfig: startupPlan.launchConfig,
-        launchAgent: startupPlan.agent
+        launchAgent: startupPlan.agent,
+        ...(resumeProviderSession ? { resumeProviderSession } : {})
       }
     }
   }
@@ -151,18 +170,34 @@ function normalizeMobileAiVaultResumeCommandOverrides(
 }
 
 export async function resumeAiVaultSessionInTerminal(
-  client: Pick<RpcClient, 'sendRequest'>,
+  client: RpcOperationSender,
   worktreeId: string,
-  launch: MobileAiVaultResumeLaunch & { clientMutationId?: string }
+  launch: MobileAiVaultResumeLaunch & {
+    clientMutationId?: string
+    hostCapabilities?: readonly string[]
+  },
+  assertCurrentOwner?: () => void
 ): Promise<MobileReviewTerminalTab> {
-  const created = await client.sendRequest(
-    'session.tabs.createTerminal',
+  assertCurrentOwner?.()
+  // Qoder's execution host must select its installed executable before the resume starts.
+  const launchAtCreate =
+    launch.launchAgent === 'qoder' &&
+    Boolean(launch.clientMutationId) &&
+    launch.hostCapabilities?.includes(QODER_OWNED_TERMINAL_CREATE_CAPABILITY) === true
+  // Await requests outside refusal handling so transport errors keep their original delivery-unknown identity.
+  const created = await reviewTerminalCreateRun.request(
+    client,
     {
       worktree: `id:${worktreeId}`,
+      ...(launchAtCreate ? { command: launch.command } : {}),
       ...(launch.env ? { env: launch.env } : {}),
       ...(launch.envToDelete ? { envToDelete: launch.envToDelete } : {}),
       ...(launch.launchConfig ? { launchConfig: launch.launchConfig } : {}),
       ...(launch.launchAgent ? { launchAgent: launch.launchAgent } : {}),
+      // Older hosts strip it and learn the session from the agent's first report instead.
+      ...(launch.resumeProviderSession
+        ? { resumeProviderSession: launch.resumeProviderSession }
+        : {}),
       ...(launch.clientMutationId ? { clientMutationId: launch.clientMutationId } : {}),
       activate: false,
       select: true,
@@ -170,15 +205,17 @@ export async function resumeAiVaultSessionInTerminal(
     },
     { timeoutMs: RESUME_RPC_TIMEOUT_MS }
   )
-  if (!created.ok) {
-    throw new Error(created.error?.message || 'Failed to create terminal')
+  let terminalTab
+  terminalTab = interpretOrThrowRefusalMessage(
+    () => reviewTerminalCreateRun.interpret(created),
+    'Failed to create terminal'
+  )
+  if (launchAtCreate) {
+    return terminalTab
   }
-  const terminalTab = readMobileReviewCreatedTerminal(created.result)
-  if (!terminalTab) {
-    throw new Error('Created terminal response was invalid')
-  }
-  const sent = await client.sendRequest(
-    'terminal.send',
+  assertCurrentOwner?.()
+  const sent = await reviewTerminalSendRun.request(
+    client,
     {
       terminal: terminalTab.terminal,
       text: launch.command,
@@ -186,10 +223,12 @@ export async function resumeAiVaultSessionInTerminal(
     },
     { timeoutMs: RESUME_RPC_TIMEOUT_MS }
   )
-  if (!sent.ok) {
-    throw new Error(sent.error?.message || 'Failed to send resume command')
-  }
-  if (!readMobileReviewTerminalSendAccepted(sent.result)) {
+  let accepted
+  accepted = interpretOrThrowRefusalMessage(
+    () => reviewTerminalSendRun.interpret(sent),
+    'Failed to send resume command'
+  )
+  if (!accepted) {
     throw new Error('Terminal input is locked')
   }
   return terminalTab
@@ -200,9 +239,7 @@ export type MobileAiVaultResumeMutationRegistry = {
   releaseOnSuccess(sessionId: string): void
 }
 
-// Why: a retry after a failed/interrupted resume must reuse the same
-// idempotency key so the host dedups the create, while a resume after success
-// mints a fresh key so the user can intentionally fork the session.
+// Reuse mutation ids after failed/interrupted resumes for deduplication; mint fresh only after success so deliberate forks remain possible.
 export function createMobileAiVaultResumeMutationRegistry(
   mintId: (sessionId: string) => string
 ): MobileAiVaultResumeMutationRegistry {

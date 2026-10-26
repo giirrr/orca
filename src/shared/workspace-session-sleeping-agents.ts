@@ -5,6 +5,7 @@ import {
   RESUMABLE_TUI_AGENTS
 } from './agent-session-resume'
 import { isValidTerminalTabId } from './terminal-tab-id'
+import { normalizeMainAgentStatusField } from './agent-status-types'
 import { salvagingRecord } from './zod-salvage'
 
 const terminalTabIdSchema = z
@@ -17,9 +18,9 @@ const agentProviderSessionSchema = z.preprocess(
   z.object({
     key: z.enum(['session_id', 'conversation_id']),
     id: z.string().min(1).max(512),
-    // Why: Pi resumes by its authoritative session file, so dropping this
-    // field during hydration makes an otherwise valid record unusable.
-    transcriptPath: z.string().min(1).optional()
+    // Pi resume requires its persisted authoritative transcript path.
+    transcriptPath: z.string().min(1).optional(),
+    cwd: z.string().min(1).optional()
   })
 )
 
@@ -62,12 +63,11 @@ const sleepingAgentLaunchEnvSchema = z.preprocess(
   z.record(z.string(), z.string())
 )
 
-const sleepingAgentLaunchConfigBaseSchema = z.object({
+export const sleepingAgentLaunchConfigBaseSchema = z.object({
   agentCommand: z.string().optional(),
   agentArgs: z.string(),
   agentEnv: sleepingAgentLaunchEnvSchema,
-  // Why: AI Vault can scan arbitrary OMP roots, so cold restore must retain
-  // the exact provider resume locator instead of reconstructing its store.
+  // AI Vault scans arbitrary OMP roots; retain the exact resume locator for cold restore.
   ompResumeFilePath: z
     .string()
     .trim()
@@ -82,7 +82,7 @@ export const sleepingAgentLaunchConfigSchema = z.preprocess((raw) => {
   return parsed.success ? parsed.data : undefined
 }, sleepingAgentLaunchConfigBaseSchema.optional())
 
-const sleepingAgentSessionRecordSchema = z
+export const sleepingAgentSessionRecordSchema = z
   .object({
     paneKey: z.string().refine((value) => value.length > 0),
     tabId: terminalTabIdSchema.optional(),
@@ -96,6 +96,8 @@ const sleepingAgentSessionRecordSchema = z
     terminalTitle: z.string().optional(),
     lastAssistantMessage: z.string().optional(),
     interrupted: z.boolean().optional(),
+    // A malformed value drops the field, never the record.
+    mainAgent: z.unknown().transform(normalizeMainAgentStatusField).optional(),
     connectionId: z.string().nullable().optional(),
     launchConfig: sleepingAgentLaunchConfigSchema.optional(),
     origin: z.enum(['worktree-sleep', 'quit', 'live']).optional(),
@@ -103,8 +105,7 @@ const sleepingAgentSessionRecordSchema = z
   })
   .refine(
     (record) => getAgentResumeArgv(record.agent, record.providerSession) !== null,
-    // Why: a hydrated record must be directly resumable; Pi additionally needs
-    // its persisted transcript path and agents must use their supported key.
+    // Resume must use a supported provider key; Pi also requires its transcript path.
     { message: 'provider session is not resumable for this agent', path: ['providerSession'] }
   )
 

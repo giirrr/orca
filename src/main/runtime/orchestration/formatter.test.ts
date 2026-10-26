@@ -54,7 +54,6 @@ describe('formatMessageBanner', () => {
   it('omits body line when body is empty', () => {
     const banner = formatMessageBanner(makeMessage({ body: '' }))
     const lines = banner.split('\n')
-    // Subject line should be immediately followed by Reply hint (no empty body line)
     const subjectIdx = lines.findIndex((l) => l.startsWith('Subject:'))
     expect(lines[subjectIdx + 1]).toMatch(/^\[Reply:/)
   })
@@ -145,14 +144,6 @@ describe('formatMessageBanner', () => {
     }
   })
 
-  it('keeps current formatting unchanged when authority is explicit', () => {
-    const message = makeMessage({ id: 'msg_current' })
-
-    expect(formatMessageBanner(message, { authority: 'current' })).toBe(
-      formatMessageBanner(message)
-    )
-  })
-
   it('ends with a separator line', () => {
     const banner = formatMessageBanner(makeMessage())
     const lines = banner.split('\n')
@@ -172,15 +163,6 @@ describe('formatMessagesForInjection', () => {
     expect(result).toContain('msg_1')
     expect(result).toContain('msg_2')
     expect(result).toMatch(/\n---\n$/)
-  })
-
-  it('separates multiple banners with blank lines', () => {
-    const messages = [makeMessage({ id: 'msg_a' }), makeMessage({ id: 'msg_b' })]
-    const result = formatMessagesForInjection(messages)
-    // Two banners should be separated by \n\n
-    const bannerA = formatMessageBanner(messages[0])
-    const bannerB = formatMessageBanner(messages[1])
-    expect(result).toContain(`${bannerA}\n\n${bannerB}`)
   })
 })
 

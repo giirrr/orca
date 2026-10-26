@@ -1,5 +1,7 @@
+import { WindowsCmdLineBreakError } from '@orca/process-host'
 import type { CommitMessagePlan } from '../../shared/commit-message-plan'
-import { UnsafeWindowsBatchArgumentsError } from '../win32-utils'
+import { supervisedProviderSpawnFailure } from '../provider-process/provider-spawn-failure-report'
+import { stopSupervisedChildProcess } from '../provider-process/supervised-child-process-stop'
 import { terminateWindowsProcessTree } from '../windows-process-tree-kill'
 import {
   finalizeFromAgentOutput,
@@ -22,6 +24,8 @@ import type {
   TextGenerationOperation
 } from './source-control-text-generation-types'
 
+export const SOURCE_CONTROL_KILL_SITE = 'source-control-text-generation'
+
 export async function killSourceControlAgentProcess(
   child: SpawnedSourceControlAgentProcess
 ): Promise<void> {
@@ -29,18 +33,47 @@ export async function killSourceControlAgentProcess(
   if (!pid) {
     return
   }
+  if (child.supervised) {
+    await stopSupervisedChildProcess(child, { site: SOURCE_CONTROL_KILL_SITE })
+    return
+  }
   if (process.platform === 'win32') {
-    // taskkill owns the tree, but the own-Chromium gate can refuse the
-    // pid-addressed walk; the handle-addressed root kill below cannot reach the
-    // recycled pid it refused, and callers release the managed-home lock on this
-    // promise, so it must not resolve having killed nothing.
-    await terminateWindowsProcessTree(pid, { site: 'source-control-text-generation' })
+    // Tree-walk refusal must not release the home lock having killed nothing; root handle kill cannot hit a recycled PID.
+    await terminateWindowsProcessTree(pid, { site: SOURCE_CONTROL_KILL_SITE })
   }
   try {
     child.kill('SIGKILL')
   } catch {
     // The process may exit between the PID check and kill.
   }
+}
+
+// Windows has 32767 UTF-16 command-line units including quoting/separators; reserve headroom for cmd shim wrappers.
+const WINDOWS_COMMAND_LINE_UNIT_BUDGET = 30_000
+
+function exceedsWindowsCommandLineBudget(command: string, args: string[]): boolean {
+  let units = command.length + args.length
+  for (const arg of args) {
+    units += arg.length + 2
+  }
+  return units > WINDOWS_COMMAND_LINE_UNIT_BUDGET
+}
+
+// Linux caps each argv entry in bytes (128KiB on 4KiB pages), before total argv capacity; reserve headroom for single-prompt arguments.
+const LINUX_SINGLE_ARGUMENT_BYTE_BUDGET = 120 * 1024
+
+function exceedsLinuxArgumentBudget(args: string[]): boolean {
+  return args.some((arg) => Buffer.byteLength(arg, 'utf8') > LINUX_SINGLE_ARGUMENT_BYTE_BUDGET)
+}
+
+function argumentBudgetFailure(plan: CommitMessagePlan): string | null {
+  if (process.platform === 'win32' && exceedsWindowsCommandLineBudget(plan.binary, plan.args)) {
+    return `${plan.label} prompt is too large for the Windows command line. Stage fewer changes and try again.`
+  }
+  if (process.platform === 'linux' && exceedsLinuxArgumentBudget(plan.args)) {
+    return `${plan.label} prompt is too large to pass as a single command-line argument. Stage fewer changes and try again.`
+  }
+  return null
 }
 
 export function runLocalSourceControlPlan(input: {
@@ -58,29 +91,38 @@ export function runLocalSourceControlPlan(input: {
   const processClosed = new Promise<void>((resolve) => {
     markProcessClosed = resolve
   })
+  const couldNotStart = `${plan.label} could not be started. Check the agent command in Settings and try again.`
   const result = new Promise<InternalTextGenerationResult>((resolve) => {
     let child: SpawnedSourceControlAgentProcess
     try {
+      // Reject oversized argv before opaque E2BIG spawn failure so users can act on the prompt-size limit.
+      const budgetFailure = argumentBudgetFailure(plan)
+      if (budgetFailure) {
+        markProcessClosed()
+        resolve({ success: false, error: budgetFailure })
+        return
+      }
       child = input.spawnAgent({
         binary: plan.binary,
         args: plan.args,
         cwd,
         env: input.env,
+        commandEnv: plan.env,
         wslDistro: input.wslDistro,
         stdinMode: 'pipe',
         useCwdForNative: true
       })
     } catch (error) {
       markProcessClosed()
-      if (error instanceof UnsafeWindowsBatchArgumentsError) {
-        resolve({ success: false, error: userFacingUnsafeWindowsBatchArgs(plan.label) })
+      if (error instanceof WindowsCmdLineBreakError) {
+        resolve({
+          success: false,
+          error: userFacingUnsafeWindowsBatchArgs(plan.label)
+        })
         return
       }
       console.error('[commit-message] Failed to spawn local generator:', error)
-      resolve({
-        success: false,
-        error: `${plan.label} could not be started. Check the agent command in Settings and try again.`
-      })
+      resolve({ success: false, error: couldNotStart })
       return
     }
 
@@ -120,7 +162,11 @@ export function runLocalSourceControlPlan(input: {
     const cancel = (): void => {
       canceledByUser = true
       startTermination()
-      finalize({ success: false, error: 'Generation canceled.', canceled: true })
+      finalize({
+        success: false,
+        error: 'Generation canceled.',
+        canceled: true
+      })
     }
     setLocalGenerationCancelToken(laneKey, cancel)
     timer = setTimeout(() => {
@@ -169,7 +215,11 @@ export function runLocalSourceControlPlan(input: {
     const onClose = (code: number | null): void => {
       markClosedAfterTermination()
       if (canceledByUser) {
-        finalize({ success: false, error: 'Generation canceled.', canceled: true })
+        finalize({
+          success: false,
+          error: 'Generation canceled.',
+          canceled: true
+        })
         return
       }
       if (outputLimitExceeded) {
@@ -179,14 +229,25 @@ export function runLocalSourceControlPlan(input: {
         })
         return
       }
+      const spawnFailure = supervisedProviderSpawnFailure(code, stderr)
+      if (spawnFailure?.thrown) {
+        console.error('[commit-message] Failed to spawn local generator:', spawnFailure.error)
+        finalize({ success: false, error: couldNotStart })
+        return
+      }
+      if (spawnFailure) {
+        onError(spawnFailure.error)
+        return
+      }
       finalize(
         finalizeFromAgentOutput({
           code,
           stdout,
           stderr,
           label: plan.label,
+          outputFormat: plan.outputFormat,
           emptyResultName: input.emptyResultName,
-          includeStdoutDetail: operation !== 'branch-name'
+          includeStdoutDetail: operation !== 'branch-name' && operation !== 'conversation-name'
         })
       )
     }

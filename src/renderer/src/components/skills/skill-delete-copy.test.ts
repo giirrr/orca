@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { SkillDeletePlan } from '../../../../shared/skill-delete-contract'
 import {
   skillDeleteBlockedLines,
@@ -25,14 +25,14 @@ describe('skillDeletePlacementSummary', () => {
               kind: 'canonical',
               rootLabel: 'Agent skills home'
             },
-            { path: '/home/.claude/skills/demo', kind: 'alias-dir', rootLabel: 'Claude home' }
+            { path: '/home/.claude/skills/demo', kind: 'alias-dir', rootLabel: 'Claude Code home' }
           ]
         }
       ])
     )
     expect(summary).toContain('1')
     expect(summary).toContain('Agent skills home')
-    expect(summary).toContain('Claude home')
+    expect(summary).toContain('Claude Code home')
   })
 
   it('drops the zero half so a link-only delete never reads "0 folders"', () => {
@@ -54,8 +54,6 @@ describe('skillDeletePlacementSummary', () => {
   })
 
   it('is null when the plan removes nothing', () => {
-    // Otherwise the dialog read "0 folders and 0 links across " with an empty
-    // tail, beside a red button that could not do anything.
     expect(
       skillDeletePlacementSummary(
         plan([
@@ -143,4 +141,42 @@ describe('skillDeleteResultLines', () => {
       skillDeleteResultLines([{ id: 'a', name: 'a', status: 'deleted', removedPaths: ['/x'] }])
     ).toEqual([])
   })
+})
+
+it('sorts deletion roots once with unchanged case, accent, and number ordering', () => {
+  const labels = ['éclair', 'Eclair', 'item2', 'item10', 'Ångström', 'zebra', 'İstanbul']
+  const expected = [...labels].sort((a, b) =>
+    // ast-grep-ignore: no-repeated-collator -- Preserve the old comparator as the parity oracle.
+    a.localeCompare(b, undefined, { sensitivity: 'base' })
+  )
+  const NativeCollator = Intl.Collator
+  const construct = vi.spyOn(Intl, 'Collator').mockImplementation(function (locales, options) {
+    return new NativeCollator(locales, options)
+  })
+  const localeCompare = vi.spyOn(String.prototype, 'localeCompare')
+  try {
+    const summary = skillDeletePlacementSummary(
+      plan([
+        {
+          id: 'a',
+          name: 'demo',
+          canonicalPath: '/root/demo/SKILL.md',
+          placements: labels.map((rootLabel) => ({
+            path: '/root/demo',
+            kind: 'canonical',
+            rootLabel
+          }))
+        }
+      ])
+    )
+    expect(summary).toContain(expected.join(', '))
+    // The process-wide renderer collator must be constructed at most once, never per comparison.
+    expect(construct.mock.calls.length).toBeLessThanOrEqual(1)
+    for (const call of construct.mock.calls) {
+      expect(call).toEqual([undefined, { sensitivity: 'base' }])
+    }
+    expect(localeCompare).not.toHaveBeenCalled()
+  } finally {
+    vi.restoreAllMocks()
+  }
 })

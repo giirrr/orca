@@ -3,7 +3,7 @@ import type { PRCheckDetail } from '../../../src/shared/github/check-types'
 import type { PRInfo } from '../../../src/shared/github/pull-request-types'
 import type { GitHubWorkItemDetails } from '../../../src/shared/github/work-item-types'
 import type { HostedReviewInfo } from '../../../src/shared/hosted-review'
-import type { GitHubPrReadOutcome } from './github-pr-rpc'
+import { fetchPRChecks, type GitHubPrReadOutcome } from './github-pr-rpc'
 import {
   classifyPrSidebarFailure,
   emptyPrSidebarDetails,
@@ -17,6 +17,7 @@ import {
   type PrSidebarLoadDeps
 } from './mobile-pr-sidebar-state'
 import { buildMobilePrSidebarIdentity } from './use-mobile-pr-sidebar-controller'
+import type { RpcResponse } from '../transport/types'
 
 function ok<T>(result: T): GitHubPrReadOutcome<T> {
   return { ok: true, result }
@@ -40,6 +41,13 @@ const DETAILS = { item: { number: 7 }, checks: [] } as unknown as GitHubWorkItem
 const CHECKS: PRCheckDetail[] = [
   { name: 'ci', status: 'completed', conclusion: 'success', url: null }
 ]
+
+const RESULT_ABSENT_REPLY: RpcResponse = {
+  id: 'x',
+  ok: true,
+  result: undefined,
+  _meta: { runtimeId: 'r' }
+}
 
 function ghInfo(over: Partial<HostedReviewInfo> = {}): HostedReviewInfo {
   return {
@@ -88,12 +96,12 @@ describe('loadPrSidebarData', () => {
       branch: 'feat',
       headSha: 'sha-status'
     })
-    expect(out).toEqual({ kind: 'ready', data: { pr: PR, details: null, checks: CHECKS } })
-    // Details (heavy comments payload) are NOT fetched on the critical path.
+    expect(out).toEqual({
+      kind: 'ready',
+      data: { pr: PR, details: null, checks: CHECKS, checksError: null }
+    })
     expect(d.fetchWorkItemDetails).not.toHaveBeenCalled()
-    // forBranch's PR number is threaded into prForBranch as the linked hint.
     expect(d.fetchPRForBranch).toHaveBeenCalledWith('w', { branch: 'feat', linkedPRNumber: 7 })
-    // The fetched PR head wins over the route's cached status SHA.
     expect(d.fetchPRChecks).toHaveBeenCalledWith('w', {
       prNumber: 7,
       headSha: 'sha-pr',
@@ -116,7 +124,10 @@ describe('loadPrSidebarData', () => {
     })
     const out = await loadPrSidebarData(d, { worktreeId: 'w', branch: 'feat' })
     expect(d.fetchPRForBranch).toHaveBeenCalledWith('w', { branch: 'feat', linkedPRNumber: 42 })
-    expect(out).toEqual({ kind: 'ready', data: { pr: merged, details: null, checks: CHECKS } })
+    expect(out).toEqual({
+      kind: 'ready',
+      data: { pr: merged, details: null, checks: CHECKS, checksError: null }
+    })
   })
 
   it('prefers the forBranch open hint over the worktree linkedPR', async () => {
@@ -150,12 +161,37 @@ describe('loadPrSidebarData', () => {
     expect(out).toEqual({ kind: 'none' })
   })
 
-  it('routes a checks failure through the classifier', async () => {
+  // Checks failure must preserve the PR’s unrelated title/comments/merge controls.
+  it('keeps the PR rendered when the checks read fails, carrying the message', async () => {
     const out = await loadPrSidebarData(
       deps({ fetchPRChecks: vi.fn(async () => fail<PRCheckDetail[]>('403 forbidden')) }),
       { worktreeId: 'w', branch: 'feat' }
     )
-    expect(out.kind).toBe('blocked')
+    expect(out).toEqual({
+      kind: 'ready',
+      data: { pr: PR, details: null, checks: [], checksError: '403 forbidden' }
+    })
+  })
+
+  // Reject malformed check payloads while retaining the PR and readable check-error feedback.
+  it('keeps the PR rendered when the host sends a checks reply the reader refuses', async () => {
+    const sendRequest = vi.fn(async () => RESULT_ABSENT_REPLY)
+    const out = await loadPrSidebarData(
+      deps({
+        fetchPRChecks: (worktreeId, args) => fetchPRChecks({ sendRequest }, worktreeId, args)
+      }),
+      { worktreeId: 'repo-1::/w', branch: 'feat' }
+    )
+    expect(out).toEqual({
+      kind: 'ready',
+      data: {
+        pr: PR,
+        details: null,
+        checks: [],
+        checksError: 'The host sent a reply this app could not read (github.prChecks)'
+      }
+    })
+    expect(sendRequest).toHaveBeenCalledOnce()
   })
 
   it('returns an error state when a dep rejects (no escaping rejection)', async () => {
@@ -253,7 +289,6 @@ describe('isPrSidebarDetailsPlaceholder / prSidebarDetailsNeedFetch', () => {
     const placeholder = emptyPrSidebarDetails(PR)
     expect(isPrSidebarDetailsPlaceholder(placeholder)).toBe(true)
     expect(isPrSidebarDetailsPlaceholder(DETAILS)).toBe(false)
-    // Host work-item ids use a colon (`pr:7`); placeholders use a hyphen (`pr-7`).
     expect(
       isPrSidebarDetailsPlaceholder({
         ...DETAILS,
@@ -271,12 +306,8 @@ describe('isPrSidebarDetailsPlaceholder / prSidebarDetailsNeedFetch', () => {
 })
 
 describe('buildMobilePrSidebarIdentity', () => {
-  it('keys identity on worktree + branch, not head SHA', () => {
+  it('keys identity on worktree and branch', () => {
     expect(buildMobilePrSidebarIdentity({ worktreeId: 'w1', branch: 'feat' })).toBe('w1\u0000feat')
-    // Head advances on commit must not form a new identity — soft refresh keeps ready UI.
-    expect(buildMobilePrSidebarIdentity({ worktreeId: 'w1', branch: 'feat' })).toBe(
-      buildMobilePrSidebarIdentity({ worktreeId: 'w1', branch: 'feat' })
-    )
   })
 
   it('is null without a branch and changes when branch or worktree changes', () => {

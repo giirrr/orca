@@ -5,14 +5,12 @@ import { translate } from '@/i18n/i18n'
 import { useConfirmationDialog } from '@/components/confirmation-dialog-context'
 import { agentLabel } from './ai-vault-session-filters'
 
-/**
- * Confirms, then deletes an AI Vault session: toasts the outcome and forces a
- * refresh so the row goes away immediately.
- */
 export function useAiVaultSessionDeleteAction({
-  refresh
+  refresh,
+  onDeleted
 }: {
   refresh: (options: { force: boolean }) => Promise<void>
+  onDeleted?: (session: AiVaultSession) => void
 }): (session: AiVaultSession) => Promise<void> {
   const confirm = useConfirmationDialog()
 
@@ -45,17 +43,16 @@ export function useAiVaultSessionDeleteAction({
           executionHostId: session.executionHostId
         })
         if (result.outcome !== 'deleted') {
-          // 'rejected' and 'failed' share one message: the specific reason is a
-          // main-side detail, not something to surface raw.
+          // Use one failure message rather than exposing raw main-side reasons.
           throw new Error(result.outcome)
         }
+        onDeleted?.(session)
         toast.success(
           translate('auto.components.right.sidebar.AiVaultPanel.sessionDeleted', 'Session deleted')
         )
         // Main already invalidated its caches; this is only for immediate UX.
         void refresh({ force: true })
       } catch {
-        // A rejected IPC invoke (transport/serialization) lands here too.
         toast.error(
           translate(
             'auto.components.right.sidebar.AiVaultPanel.sessionDeleteFailed',
@@ -64,6 +61,6 @@ export function useAiVaultSessionDeleteAction({
         )
       }
     },
-    [confirm, refresh]
+    [confirm, refresh, onDeleted]
   )
 }

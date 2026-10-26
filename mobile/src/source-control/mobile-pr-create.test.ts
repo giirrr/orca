@@ -7,6 +7,7 @@ import {
   buildMobilePrCreateParams,
   getMobilePrCreateBlockMessage,
   mobileRepoSelectorFromWorktreeId,
+  createMobilePr,
   resolveMobilePrPrefill,
   shouldPushBeforeMobilePrCreate,
   type MobilePrPrefill
@@ -120,8 +121,6 @@ describe('mobile create form gating parity', () => {
         canCreate: desktopEligibility.canCreate,
         blockedReason: desktopEligibility.blockedReason,
         nextAction: desktopEligibility.nextAction,
-        // Mobile receives the lookup outcome from eligibility; thread it so the
-        // gate reflects real prefills (current hosts always populate it).
         reviewLookupOutcome: desktopEligibility.reviewLookupOutcome
       }) === null
 
@@ -129,8 +128,7 @@ describe('mobile create form gating parity', () => {
   })
 
   it('fails closed when the review-lookup outcome is missing (older host)', () => {
-    // A host that predates `reviewLookupOutcome` leaves review existence unproven.
-    // Mobile must not open Create / Push & Create on that ambiguity.
+    // Older hosts without reviewLookupOutcome cannot prove no review exists.
     expect(
       getMobilePrCreateBlockMessage({
         provider: 'github',
@@ -157,35 +155,7 @@ describe('mobile create form gating parity', () => {
     )
   })
 
-  it('desktop gate hard-blocks on positive unresolved review evidence', () => {
-    // Mobile lacks review-lookup signals, so it fails closed on ambiguity: the
-    // shared desktop gate must return false even when eligibility looks ready.
-    expect(
-      shouldOpenChecksPanelCreateComposer({
-        activeReview: null,
-        isFolder: false,
-        branch: 'feature/x',
-        hostedReviewCreation: eligibility({ canCreate: true }),
-        reviewLookup: 'positive_unresolved'
-      })
-    ).toBe(false)
-  })
-
-  it('desktop gate hard-blocks during a hard refresh error', () => {
-    expect(
-      shouldOpenChecksPanelCreateComposer({
-        activeReview: null,
-        isFolder: false,
-        branch: 'feature/x',
-        hostedReviewCreation: eligibility({ canCreate: true }),
-        hasHardRefreshError: true
-      })
-    ).toBe(false)
-  })
-
   it('fails closed on an unavailable review lookup even when eligibility looks ready', () => {
-    // The existing-review lookup could not prove there is no PR; mobile has no
-    // review-lookup signal of its own, so create must be blocked.
     expect(
       getMobilePrCreateBlockMessage({
         provider: 'github',
@@ -202,8 +172,7 @@ describe('mobile create form gating parity', () => {
   })
 
   it('fails closed on unavailable even on the needs_push Push & Create path', () => {
-    // needs_push would normally be allowed (Push & Create); an unavailable lookup
-    // must still block it — this is the fail-open gap the parity gate closes.
+    // An unavailable lookup must block even needs_push, which would otherwise offer Push & Create.
     const mobileBlocked =
       getMobilePrCreateBlockMessage({
         provider: 'github',
@@ -252,6 +221,37 @@ describe('resolveMobilePrPrefill', () => {
     behind: 0
   }
 
+  it('sends back a provider token this build does not list, unchanged', async () => {
+    // Round-trip new provider tokens; enum fallback would make the host refuse its own provider.
+    const client = clientWith([
+      ok({
+        provider: 'codeberg',
+        canCreate: true,
+        review: null,
+        blockedReason: null,
+        nextAction: null,
+        defaultBaseRef: 'main',
+        title: 'Add feature',
+        body: '',
+        reviewLookupOutcome: 'not_found'
+      }),
+      ok({ ok: true, number: 12, url: 'https://codeberg.test/pr/12' }),
+      ok({ worktree: { id: 'wt' } })
+    ])
+    const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
+    expect(prefill.provider).toBe('codeberg')
+
+    await createMobilePr(client, 'repo-1::/tmp/wt', {
+      provider: prefill.provider,
+      base: prefill.base,
+      title: prefill.title,
+      body: prefill.body,
+      draft: false
+    })
+    const created = client.calls.find((call) => call.method === 'hostedReview.create')
+    expect(created?.params).toMatchObject({ provider: 'codeberg' })
+  })
+
   it('derives provider/base/title/body from eligibility (non-GitHub honored)', async () => {
     const client = clientWith([
       ok({
@@ -297,7 +297,47 @@ describe('resolveMobilePrPrefill', () => {
     expect(getMobilePrCreateBlockMessage(prefill)).toBeNull()
   })
 
-  it('returns a mobile block message for desktop-blocked create states', async () => {
+  it('returns a blocked fallback when eligibility is unavailable', async () => {
+    const client = clientWith([fail('nope')])
+    const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
+    expect(prefill).toEqual({
+      provider: 'github',
+      base: 'main',
+      title: 'feature/x',
+      body: '',
+      // Missing canCreate means unresolved eligibility, not a determination that the branch is unready.
+      blockedReason: null,
+      nextAction: null,
+      reviewLookupOutcome: 'unavailable'
+    })
+    expect(getMobilePrCreateBlockMessage(prefill)).not.toBeNull()
+  })
+
+  // Use unavailable copy when eligibility cannot resolve; blocked copy requires an explicit canCreate: false.
+  const UNCONFIRMED =
+    'Orca could not confirm whether this branch already has a pull request. Try again in a moment.'
+
+  it.each([
+    { name: 'a malformed reply', responses: [ok({ provider: 7 })] },
+    { name: 'a refusal', responses: [fail('nope')] }
+  ])('asks the user to retry after $name', async ({ responses }) => {
+    const prefill = await resolveMobilePrPrefill(clientWith(responses), 'repo-1::/tmp/wt', baseArgs)
+    expect(prefill.canCreate).toBeUndefined()
+    expect(getMobilePrCreateBlockMessage(prefill)).toBe(UNCONFIRMED)
+  })
+
+  it('asks the user to retry after a transport rejection', async () => {
+    const rejecting = {
+      sendRequest: vi.fn(async () => {
+        throw new Error('offline')
+      })
+    }
+    const prefill = await resolveMobilePrPrefill(rejecting, 'repo-1::/tmp/wt', baseArgs)
+    expect(prefill.canCreate).toBeUndefined()
+    expect(getMobilePrCreateBlockMessage(prefill)).toBe(UNCONFIRMED)
+  })
+
+  it('still blocks when the host determined the branch is not ready', async () => {
     const client = clientWith([
       ok({
         provider: 'github',
@@ -310,27 +350,10 @@ describe('resolveMobilePrPrefill', () => {
       })
     ])
     const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
+    expect(prefill.canCreate).toBe(false)
     expect(getMobilePrCreateBlockMessage(prefill)).toBe(
       'Commit changes before creating a pull request.'
     )
-  })
-
-  it('returns a blocked fallback when eligibility is unavailable', async () => {
-    const client = clientWith([fail('nope')])
-    const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
-    expect(prefill).toEqual({
-      provider: 'github',
-      base: 'main',
-      title: 'feature/x',
-      body: '',
-      canCreate: false,
-      blockedReason: null,
-      nextAction: null,
-      // Eligibility could not be resolved, so the review lookup is unproven.
-      reviewLookupOutcome: 'unavailable'
-    })
-    // A prefill Orca could not resolve must not offer create.
-    expect(getMobilePrCreateBlockMessage(prefill)).not.toBeNull()
   })
 
   it('threads reviewLookupOutcome from eligibility into the prefill and blocks needs_push', async () => {

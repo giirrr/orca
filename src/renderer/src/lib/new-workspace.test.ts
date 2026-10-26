@@ -73,12 +73,13 @@ vi.mock('@/store', () => ({
 }))
 
 vi.mock('@/runtime/runtime-terminal-inspection', () => ({
-  inspectRuntimeTerminalProcess: mockInspectRuntimeTerminalProcess,
+  inspectRuntimeTerminalProcess: mockInspectRuntimeTerminalProcess
+}))
+vi.mock('@/runtime/runtime-terminal-verified-input', () => ({
   sendRuntimePtyInputVerified: mockSendRuntimePtyInputVerified
 }))
 
 vi.mock('@/lib/agent-paste-draft', () => ({
-  getSettingsForAgentTabRuntimeOwner: () => store.settings,
   pasteDraftToAgentPtyWhenReady: mockPasteDraftToAgentPtyWhenReady
 }))
 
@@ -97,11 +98,17 @@ vi.mock('@/lib/agent-background-session-timeout-toast', () => ({
 import {
   canUseIssueCommandForLinkedItemProvider,
   ensureAgentStartupInTerminal,
+  getLinkedWorkItemProvider,
   getSetupConfig,
   getWorkspaceSeedName,
   isGitLabIssueUrl
 } from './new-workspace'
 import { resetAgentStartupDelayedDeliveryForTests } from './agent-startup-delayed-delivery'
+import { getLinkedWorkItemProvider as directGetLinkedWorkItemProvider } from './linked-work-item-provider'
+
+it('keeps linked item provider selection available through the workspace module', () => {
+  expect(getLinkedWorkItemProvider).toBe(directGetLinkedWorkItemProvider)
+})
 
 describe('linked-item issue commands', () => {
   it('keeps Jira and Linear sentinel numbers out of repository issue templates', () => {
@@ -177,9 +184,7 @@ describe('getWorkspaceSeedName', () => {
   })
 
   it('does not leave internal ".." in the slug (git refuses such branches)', () => {
-    // Why: the original composer bug — a prompt containing "../../" in
-    // relative path references slugified to a name with internal `..`,
-    // which git rejects with "is not a valid branch name".
+    // ../../ references can slugify to internal .., which git rejects as a branch name.
     const seed = getWorkspaceSeedName({
       explicitName: '',
       prompt: 'For ../../ the sibling worktree from another repo',
@@ -293,7 +298,11 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
       }
     })
 
-    expect(mockSendRuntimePtyInputVerified).toHaveBeenCalledWith({}, 'pty-1', 'fix the spinner\r')
+    expect(mockSendRuntimePtyInputVerified).toHaveBeenCalledWith(
+      'pty-1',
+      'fix the spinner\r',
+      'launch'
+    )
     expect(mockTrack).not.toHaveBeenCalledWith('agent_prompt_sent', expect.anything())
   })
 
@@ -315,8 +324,7 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
   })
 
   it('surfaces the not-sent toast when a follow-up prompt is dropped', async () => {
-    // Foreground never becomes a recognized agent and there is no live child,
-    // so the readiness wait times out and the prompt is not delivered.
+    // No recognized agent or live child means readiness times out without delivering text.
     mockInspectRuntimeTerminalProcess.mockResolvedValue({
       foregroundProcess: 'zsh',
       hasChildProcesses: false
@@ -406,7 +414,6 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
     })
 
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledWith({
-      tabId: 'tab-1',
       ptyId: 'pty-1',
       content: 'review this before sending',
       agent: 'claude',
@@ -450,7 +457,6 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
     })
 
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledWith({
-      tabId: 'agent-tab',
       ptyId: 'agent-pty',
       content: 'Linear context draft',
       agent: 'codex',
@@ -507,7 +513,6 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
 
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledTimes(1)
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledWith({
-      tabId: 'tab-1',
       ptyId: 'pty-delayed',
       content: 'https://github.com/stablyai/orca/pull/2051',
       agent: 'codex',
@@ -589,7 +594,6 @@ describe('ensureAgentStartupInTerminal prompt delivery', () => {
 
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledTimes(1)
     expect(mockPasteDraftToAgentPtyWhenReady).toHaveBeenCalledWith({
-      tabId: 'tab-1',
       ptyId: 'startup-pty',
       content: 'linked draft',
       agent: 'codex',

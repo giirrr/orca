@@ -1,9 +1,6 @@
-// Pure status-merge tests for native-chat-live-status.ts. Kept beside the module
-// they cover rather than in the hook's test file, which owns the IO harness.
-
 import { describe, expect, it } from 'vitest'
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
-import { mergeNativeChatLiveSession } from './native-chat-live-status'
+import { mergeNativeChatLiveSession, nativeChatHookAwaitsInput } from './native-chat-live-status'
 import { selectNativeChatViewState } from './native-chat-view-state'
 import { shouldShowNativeChatWorking } from './native-chat-working-suppression'
 
@@ -154,6 +151,36 @@ describe('mergeNativeChatLiveSession', () => {
     expect(session.status).toBe('ready')
   })
 
+  it("keeps omp working while its latest row is a tool call written after the turn's start", () => {
+    // Shaped as decodeOmpTranscriptLine emits them: every omp row carries its timestamp.
+    const turnStartedAt = Date.parse('2026-09-28T10:00:00.000Z')
+    const toolCall: NativeChatMessage = {
+      id: 'rec-2',
+      role: 'assistant',
+      blocks: [
+        { type: 'text', text: 'Running the suite.' },
+        { type: 'tool-call', name: 'bash', input: { command: 'pnpm test' } }
+      ],
+      timestamp: turnStartedAt + 4_000,
+      source: 'transcript'
+    }
+    const session = mergeNativeChatLiveSession({
+      messages: [{ ...user('rec-1', 'run the tests'), timestamp: turnStartedAt }, toolCall],
+      sessionId: 'sess',
+      agent: 'omp',
+      hookState: 'working',
+      stateStartedAt: turnStartedAt
+    })
+    expect(session.status).toBe('working')
+    expect(
+      shouldShowNativeChatWorking({
+        isConversation: true,
+        working: session.status === 'working',
+        interrupted: false
+      })
+    ).toBe(true)
+  })
+
   it('keeps working while the hook reports a live background child', () => {
     const session = mergeNativeChatLiveSession({
       messages: [assistant('a-1', 'lead done')],
@@ -200,10 +227,7 @@ describe('mergeNativeChatLiveSession', () => {
         loading: true
       }).status
     ).toBe('working')
-    // Regression: a non-null sessionId used to force 'loading' over live work,
-    // so the pane rendered idle mid-turn — Send instead of Stop, no typing
-    // indicator, no streaming preview. The empty-transcript loading SURFACE is
-    // selectNativeChatViewState's job; the status must stay 'working'.
+    // Keep working authoritative for controls; selectNativeChatViewState owns the empty-transcript loading surface.
     expect(
       mergeNativeChatLiveSession({
         messages: [],
@@ -214,8 +238,7 @@ describe('mergeNativeChatLiveSession', () => {
       }).status
     ).toBe('working')
 
-    // With any message present (a pending send echo, launch-prompt bubble or
-    // slash-command marker) the pane is a live conversation, not a spinner.
+    // Pending echoes, launch bubbles and command markers already make the conversation renderable.
     expect(
       mergeNativeChatLiveSession({
         messages: [user('u-1', 'run it')],
@@ -247,9 +270,7 @@ describe('mergeNativeChatLiveSession', () => {
     expect(session.status).toBe('empty')
   })
 
-  // The whole chain the defect broke: a fresh Claude session reports its id
-  // before the transcript flushes, so the pane rendered Send (not Stop) with no
-  // typing indicator while the agent was working.
+  // Session ids can arrive before transcript flush; live work must still retain Stop and its activity indicator.
   it('keeps the Stop affordance for a working known session mid-flush', () => {
     const session = mergeNativeChatLiveSession({
       messages: [user('u-1', 'run it')],
@@ -267,6 +288,49 @@ describe('mergeNativeChatLiveSession', () => {
         isConversation,
         working: session.status === 'working',
         interrupted: false
+      })
+    ).toBe(true)
+  })
+})
+
+describe('nativeChatHookAwaitsInput', () => {
+  it.each(['waiting', 'blocked'] as const)('reads a %s hook as a wait on the reader', (state) => {
+    expect(nativeChatHookAwaitsInput(state, 5, undefined)).toBe(true)
+    expect(
+      nativeChatHookAwaitsInput(state, 5, { state: 'working', turnId: 'turn-1', timestamp: 1 })
+    ).toBe(true)
+  })
+
+  it('reads no other hook state as a wait', () => {
+    expect(nativeChatHookAwaitsInput('working', 5, undefined)).toBe(false)
+    expect(nativeChatHookAwaitsInput('done', 5, undefined)).toBe(false)
+    expect(nativeChatHookAwaitsInput(null, 5, undefined)).toBe(false)
+  })
+
+  // An interrupt at the prompt fires no hook; the transcript's marker is the only end.
+  it('ends a wait the transcript closed after it began', () => {
+    expect(
+      nativeChatHookAwaitsInput('waiting', 5, {
+        state: 'interrupted',
+        turnId: 'turn-1',
+        timestamp: 6
+      })
+    ).toBe(false)
+    expect(
+      nativeChatHookAwaitsInput('waiting', 5, {
+        state: 'completed',
+        turnId: 'turn-1',
+        timestamp: 6
+      })
+    ).toBe(false)
+  })
+
+  it('keeps a wait that began after the last closed turn', () => {
+    expect(
+      nativeChatHookAwaitsInput('waiting', 5, {
+        state: 'interrupted',
+        turnId: 'turn-1',
+        timestamp: 2
       })
     ).toBe(true)
   })

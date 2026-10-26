@@ -1,5 +1,3 @@
-// Codex JSONL line → NativeChatMessage decoder.
-
 import {
   NATIVE_CHAT_INTERRUPTED_STATUS_TEXT,
   type NativeChatBlock,
@@ -92,10 +90,13 @@ function codexResponseItem(
     payload.type === 'custom_tool_call'
   ) {
     const name = extractString(payload.name) ?? 'tool'
+    const callId = extractString(payload.call_id)
     return {
       id,
       role: 'assistant',
-      blocks: [{ type: 'tool-call', name, input: codexCallInput(payload) }],
+      blocks: [
+        { type: 'tool-call', name, input: codexCallInput(payload), ...(callId ? { callId } : {}) }
+      ],
       timestamp,
       source: 'transcript'
     }
@@ -104,7 +105,7 @@ function codexResponseItem(
     return {
       id,
       role: 'tool',
-      blocks: [codexToolResult(payload.output)],
+      blocks: [codexToolResult(payload.output, extractString(payload.call_id))],
       timestamp,
       source: 'transcript'
     }
@@ -211,10 +212,7 @@ function codexTurnItemBlocks(content: unknown): NativeChatBlock[] {
   return blocks
 }
 
-/** The argument payload is passed through exactly as it arrived. Decoding it
- *  here would change the shape every `.input` consumer sees — including the ask
- *  surface, which reads a question shape out of any tool's input — so the one
- *  consumer that needs structure decodes it for itself. */
+/** Preserve raw argument shape for all consumers; callers needing structure decode it themselves. */
 function codexCallInput(payload: Record<string, unknown>): unknown {
   if (payload.arguments !== undefined) {
     return payload.arguments
@@ -222,12 +220,13 @@ function codexCallInput(payload: Record<string, unknown>): unknown {
   return payload.input ?? payload.action ?? null
 }
 
-function codexToolResult(output: unknown): NativeChatBlock {
+function codexToolResult(output: unknown, callId: string | null): NativeChatBlock {
   const record = asRecord(output)
   const isError = record?.success === false || record?.is_error === true
   return {
     type: 'tool-result',
     output: toolResultOutput(record?.content ?? record?.output ?? output),
+    ...(callId ? { callId } : {}),
     ...(isError ? { isError: true } : {})
   }
 }

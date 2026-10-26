@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { View, Text, Pressable, StyleSheet } from 'react-native'
-import * as Clipboard from 'expo-clipboard'
+import { useClipboardWriter } from '../platform/clipboard'
+import { triggerError } from '../platform/haptics'
 import { Check, Copy, Pencil, Play, Trash2 } from 'lucide-react-native'
 import { colors, spacing, typography } from '../theme/mobile-theme'
 import { MobileAgentIcon } from '../components/MobileAgentIcon'
@@ -33,6 +34,7 @@ export function QuickCommandRow({
   onDelete,
   disabled
 }: QuickCommandRowProps) {
+  const clipboard = useClipboardWriter()
   const isAgent = isAgentQuickCommand(command)
   const body = getTerminalQuickCommandBody(command)
   const canCopy = body.trim().length > 0
@@ -67,15 +69,17 @@ export function QuickCommandRow({
       return
     }
     try {
-      await Clipboard.setStringAsync(body)
+      await clipboard.writeText(body)
       if (!mountedRef.current) {
         return
       }
       setFeedback({ body, status: 'copied' })
     } catch {
+      // Ignore late refusal after unmount; there is no row left to explain the haptic.
       if (!mountedRef.current) {
         return
       }
+      triggerError()
       setFeedback({ body, status: 'failed' })
     }
     if (copyResetTimerRef.current) {

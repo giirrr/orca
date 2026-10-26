@@ -15,6 +15,7 @@ export type PickerOption<T extends string = string> = {
 type Props<T extends string = string> = {
   visible: boolean
   title: string
+  subtitle?: string
   options: PickerOption<T>[]
   selected: T
   onSelect: (value: T) => void
@@ -32,6 +33,7 @@ type PickerModalContentProps<T extends string = string> = Pick<
 export function PickerModal<T extends string = string>({
   visible,
   title,
+  subtitle,
   options,
   selected,
   onSelect,
@@ -44,6 +46,7 @@ export function PickerModal<T extends string = string>({
     <BottomDrawer visible={visible} onClose={onClose} onAfterClose={onAfterClose} zIndex={zIndex}>
       <View style={styles.header}>
         <Text style={styles.title}>{title}</Text>
+        {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
       </View>
 
       <PickerModalContent
@@ -64,8 +67,7 @@ function PickerModalContent<T extends string = string>({
   onLongSelect,
   onClose
 }: PickerModalContentProps<T>) {
-  // Why: closed BottomDrawer instances return null, so keeping option rows in
-  // this child avoids rebuilding hidden picker contents on every parent render.
+  // Put option rows in shown child; closed BottomDrawer returns null, avoiding hidden-content rebuilds on parent renders.
   return (
     <View style={styles.group}>
       {options.map((opt, i) => {
@@ -129,6 +131,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: colors.textMuted
+  },
+  subtitle: {
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 2
   },
   group: {
     backgroundColor: colors.bgPanel,

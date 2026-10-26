@@ -21,7 +21,7 @@ import { useRepos } from '@/store/selectors'
 import {
   summarizeReposOverridingActionRecipe,
   type SourceControlActionRecipeOverrideSummary
-} from '@/lib/source-control-launch-agent-selection'
+} from '../../../../shared/source-control-launch-agent-selection'
 import { SearchableSetting } from './SearchableSetting'
 import { getRepositorySourceControlAiActionRecipeSectionId } from './repository-settings-targets'
 import { matchesSettingsSearch } from './settings-search'
@@ -96,8 +96,7 @@ export function SourceControlAiActionRecipeDefaults({
   writeConfig
 }: SourceControlAiActionRecipeDefaultsProps): React.JSX.Element | null {
   const allRepos = useRepos()
-  // Recomputes on every keystroke in the sibling recipe textareas otherwise, so
-  // memoize the filter and the O(actions × repos) override scan on `repos`.
+  // Memoize the O(actions × repos) override scan so sibling recipe typing cannot repeat it.
   const repos = useMemo(() => allRepos.filter((repo) => !isFolderRepo(repo)), [allRepos])
   const overrideSummaries = useMemo(
     () =>

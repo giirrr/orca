@@ -81,7 +81,7 @@ export function createMobileDiffReviewFileKey(
 function statusEntryIdentity(entry: MobileGitStatusEntry, scope: DiffReviewScope): string {
   return buildMobileDiffIdentity([
     scope,
-    entry.area,
+    entry.area ?? '',
     entry.status,
     entry.oldPath ?? '',
     entry.path,
@@ -162,8 +162,14 @@ function queueNoteCounts(
   return { noteCount, unsentNoteCount, staleNoteCount }
 }
 
+type PlaceableStatusEntry = MobileGitStatusEntry & { area: MobileGitStagingArea }
+
+function isPlaceableStatusEntry(entry: MobileGitStatusEntry): entry is PlaceableStatusEntry {
+  return entry.area !== undefined
+}
+
 function statusEntryToQueueItem(
-  entry: MobileGitStatusEntry,
+  entry: PlaceableStatusEntry,
   comments: readonly DiffComment[],
   reviewState: MobileDiffReviewState
 ): MobileDiffReviewQueueItem {
@@ -200,7 +206,8 @@ function statusEntryToQueueItem(
 
 function branchEntryToQueueItem(
   entry: MobileGitBranchChangeEntry,
-  input: BuildMobileDiffReviewQueueInput
+  input: BuildMobileDiffReviewQueueInput,
+  comments: readonly DiffComment[]
 ): MobileDiffReviewQueueItem {
   const scope: DiffReviewScope = 'branch'
   const key = createMobileDiffReviewFileKey(scope, 'branch', entry.path, entry.oldPath)
@@ -208,7 +215,7 @@ function branchEntryToQueueItem(
   const reviewFileState = input.reviewState.files[key]
   const counts = queueNoteCounts(
     { filePath: entry.path, oldPath: entry.oldPath, scope, diffIdentity },
-    input.comments
+    comments
   )
   return {
     key,
@@ -233,26 +240,35 @@ function branchEntryToQueueItem(
   }
 }
 
-function compareQueueItems(
-  first: MobileDiffReviewQueueItem,
-  second: MobileDiffReviewQueueItem
-): number {
-  return (
-    SCOPE_SORT_ORDER[first.scope] - SCOPE_SORT_ORDER[second.scope] ||
-    Number(first.isGeneratedOrLockFile) - Number(second.isGeneratedOrLockFile) ||
-    first.filePath.localeCompare(second.filePath, undefined, { numeric: true })
-  )
-}
-
 export function buildMobileDiffReviewQueue(
   input: BuildMobileDiffReviewQueueInput
 ): MobileDiffReviewQueueItem[] {
-  return [
-    ...input.statusEntries.map((entry) =>
-      statusEntryToQueueItem(entry, input.comments, input.reviewState)
-    ),
-    ...input.branchEntries.map((entry) => branchEntryToQueueItem(entry, input))
-  ].sort(compareQueueItems)
+  const commentsByPath = new Map<string, DiffComment[]>()
+  for (const comment of input.comments) {
+    const comments = commentsByPath.get(comment.filePath) ?? []
+    comments.push(comment)
+    commentsByPath.set(comment.filePath, comments)
+  }
+  const queue = [
+    ...input.statusEntries
+      .filter(isPlaceableStatusEntry)
+      .map((entry) =>
+        statusEntryToQueueItem(entry, commentsByPath.get(entry.path) ?? [], input.reviewState)
+      ),
+    ...input.branchEntries.map((entry) =>
+      branchEntryToQueueItem(entry, input, commentsByPath.get(entry.path) ?? [])
+    )
+  ]
+  if (queue.length > 1) {
+    const collator = new Intl.Collator(undefined, { numeric: true })
+    queue.sort(
+      (first, second) =>
+        SCOPE_SORT_ORDER[first.scope] - SCOPE_SORT_ORDER[second.scope] ||
+        Number(first.isGeneratedOrLockFile) - Number(second.isGeneratedOrLockFile) ||
+        collator.compare(first.filePath, second.filePath)
+    )
+  }
+  return queue
 }
 
 export function filterMobileDiffReviewQueue(

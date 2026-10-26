@@ -1,4 +1,3 @@
-// src/renderer/src/components/terminal-pane/keyboard-handlers.test.ts
 import { describe, it, expect, vi } from 'vitest'
 import { FIND_QUERY_MAX_BYTES } from '@/lib/find-query-bounds'
 import {
@@ -6,7 +5,7 @@ import {
   matchSearchNavigate,
   resolveTerminalKeyboardShortcutAction,
   runTerminalSearchNavigation
-} from './keyboard-handlers'
+} from './terminal-keyboard-shortcut-matching'
 
 function makeKeyEvent(
   overrides: Partial<{

@@ -11,6 +11,7 @@ function applyWithSetting(terminalMouseEventsRequireAlt: boolean | undefined): {
   const manager = {
     getPanes: () => [{ id: 1, terminal } as ManagedPane],
     setPaneLigaturesEnabled: vi.fn(),
+    setPaneInlineImagesEnabled: vi.fn(),
     setPaneStyleOptions: vi.fn()
   } as unknown as PaneManager
 

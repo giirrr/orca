@@ -1,19 +1,9 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest'
-import {
-  buildPluginPanelShellHtml,
-  PANEL_DESIGN_TOKEN_ALLOWLIST,
-  PLUGIN_PANEL_CSP
-} from './plugin-panel-shell'
+import { buildPluginPanelShellHtml, PLUGIN_PANEL_CSP } from './plugin-panel-shell'
 
 describe('buildPluginPanelShellHtml', () => {
-  it('keeps destructive surface and foreground tokens paired', () => {
-    expect(PANEL_DESIGN_TOKEN_ALLOWLIST).toEqual(
-      expect.arrayContaining(['--destructive', '--destructive-foreground'])
-    )
-  })
-
   it('places CSP and navigation guards before plugin content', () => {
     const html = buildPluginPanelShellHtml('<main id="plugin-content">Plugin</main>')
     const pluginOffset = html.indexOf('plugin-content')
@@ -30,8 +20,7 @@ describe('buildPluginPanelShellHtml', () => {
     const html = buildPluginPanelShellHtml('<main>Plugin</main>')
     const script = html.match(/<script>\n([\s\S]*?)<\/script>/)?.[1]
     expect(script).toBeTruthy()
-    // Keep happy-dom's global removable for Vitest teardown; production shell
-    // keeps the override non-configurable inside the disposable iframe.
+    // Keep the happy-dom override removable for teardown; disposable production iframes use non-configurable globals.
     window.eval(script!.replace('configurable: false', 'configurable: true'))
 
     const anchor = document.createElement('a')

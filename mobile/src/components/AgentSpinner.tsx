@@ -1,16 +1,11 @@
-import { useEffect, useRef } from 'react'
 import { Activity } from 'lucide-react-native'
-import { Animated, Easing, StyleSheet, View } from 'react-native'
+import { Animated, StyleSheet, View } from 'react-native'
 import type { AgentWorkingMode } from '../../../src/shared/agent-status-types'
+import { useWorkingRingRotation } from './use-working-ring-rotation'
 
 type WorktreeStatus = 'working' | 'active' | 'permission' | 'done' | 'inactive'
 
-// Why: colors and sizing are 1:1 with the desktop StatusIndicator
-// (src/renderer/src/components/sidebar/StatusIndicator.tsx) so the mobile
-// worktree list reads identically to the sidebar — same yellow spinner for
-// 'working', same emerald dot for 'active'/'done', same neutral-500 @ 40%
-// for 'inactive', same red for 'permission'. Diverging palettes here lose
-// the design intent ('moving' vs 'alive' vs 'completed') the desktop encodes.
+// Match desktop sidebar StatusIndicator colors/sizes for five-state worktree rollup; palette distinguishes moving/alive/completed states.
 const STATUS_COLORS: Record<WorktreeStatus, string> = {
   working: '#eab308',
   active: '#10b981',
@@ -26,24 +21,8 @@ export function AgentSpinner({
   status: WorktreeStatus
   workingMode?: AgentWorkingMode
 }) {
-  const spinValue = useRef(new Animated.Value(0)).current
   const monitoring = status === 'working' && workingMode === 'monitoring'
-
-  useEffect(() => {
-    if (status === 'working' && !monitoring) {
-      const animation = Animated.loop(
-        Animated.timing(spinValue, {
-          toValue: 1,
-          duration: 1000,
-          easing: Easing.linear,
-          useNativeDriver: true
-        })
-      )
-      animation.start()
-      return () => animation.stop()
-    }
-    spinValue.setValue(0)
-  }, [monitoring, status, spinValue])
+  const rotate = useWorkingRingRotation(status === 'working' && !monitoring)
 
   const color = STATUS_COLORS[status] ?? STATUS_COLORS.inactive
 
@@ -56,10 +35,6 @@ export function AgentSpinner({
   }
 
   if (status === 'working') {
-    const rotate = spinValue.interpolate({
-      inputRange: [0, 1],
-      outputRange: ['0deg', '360deg']
-    })
     return (
       <View style={styles.wrapper}>
         <Animated.View style={[styles.spinner, { borderColor: color, transform: [{ rotate }] }]} />
@@ -75,10 +50,7 @@ export function AgentSpinner({
 }
 
 const styles = StyleSheet.create({
-  // Why: 12x12 wrapper centered around an 8x8 inner glyph mirrors the
-  // desktop's `inline-flex h-3 w-3 ... items-center justify-center` shell
-  // around `size-2` indicator — keeps row height/baseline alignment stable
-  // across status transitions.
+  // Match desktop 12px shell/8px glyph so row baseline remains stable through status transitions.
   wrapper: {
     width: 12,
     height: 12,

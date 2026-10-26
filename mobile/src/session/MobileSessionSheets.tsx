@@ -1,5 +1,5 @@
 import { Platform } from 'react-native'
-import * as Clipboard from 'expo-clipboard'
+import { useClipboardWriter } from '../platform/clipboard'
 import { Copy, FileText, Globe, RefreshCw, SquareTerminal } from 'lucide-react-native'
 import { MobileSessionHeaderMoreActionsSheet } from './MobileSessionHeaderMoreActionsSheet'
 import { QuickCommandsSheet } from './QuickCommandsSheet'
@@ -9,8 +9,10 @@ import { TextInputModal } from '../components/TextInputModal'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { CustomKeyModal } from '../components/CustomKeyModal'
 import { MobileDictationSetupSheet } from '../components/MobileDictationSetupSheet'
+import { useWorkspaceOnPairedHost } from '../navigation/workspace-execution-host'
 import { MobileBrowserTabActionSheet } from './MobileBrowserTabActionSheet'
 import { getMobileTerminalActionSheetActions } from './mobile-terminal-action-sheet-actions'
+import { getMobileNativeChatCliForkActions } from './mobile-native-chat-cli-fork'
 import {
   getRepoIdFromMobileWorktreeId,
   isTerminalPhoneDisplayMode
@@ -61,6 +63,7 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
     setShowDictationSetup,
     browserScreencastSupported,
     quickCommandsSupported,
+    quickCommandAgentPromptMaxLength,
     showToast,
     nativeChatTranscriptIsLocalReadable,
     nativeChatController,
@@ -69,6 +72,7 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
     readFileTab,
     leaveSession,
     discardMarkdownLocalContent,
+    copyMarkdownPath,
     confirmDiscardMarkdown,
     handleDeleteCustomKey,
     handleManageShortcuts,
@@ -90,6 +94,8 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
     showAgentSessionHistoryAction,
     showChecksAction
   } = controller
+  const clipboard = useClipboardWriter()
+  const onPairedHost = useWorkspaceOnPairedHost()
   return (
     <>
       <MobileSessionHeaderMoreActionsSheet
@@ -110,6 +116,7 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
             : getRepoIdFromMobileWorktreeId(worktreeId) || null
         }
         repoName={worktreeName || null}
+        agentPromptMaxLength={quickCommandAgentPromptMaxLength}
         onLaunch={launchQuickCommand}
       />
       <ActionSheetModal
@@ -143,14 +150,18 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
                     setShowCreateBrowserModal(true)
                   }
                 },
-                {
-                  label: 'Markdown Note',
-                  icon: FileText,
-                  onPress: () => {
-                    setShowCreateTabDrawer(false)
-                    void handleCreateMarkdownNote()
-                  }
-                }
+                ...(onPairedHost
+                  ? [
+                      {
+                        label: 'Markdown Note',
+                        icon: FileText,
+                        onPress: () => {
+                          setShowCreateTabDrawer(false)
+                          void handleCreateMarkdownNote()
+                        }
+                      }
+                    ]
+                  : [])
               ])
         ]}
         onClose={() => setShowCreateTabDrawer(false)}
@@ -170,7 +181,8 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
               if (!delivery) {
                 return
               }
-              void Clipboard.setStringAsync(delivery.prompt)
+              void clipboard
+                .writeText(delivery.prompt)
                 .then(() => {
                   triggerSuccess()
                   showToast('Notes copied')
@@ -228,8 +240,7 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
               const target = markdownActionTarget
               setMarkdownActionTarget(null)
               if (target) {
-                void Clipboard.setStringAsync(target.relativePath || target.filePath)
-                showToast('Path copied')
+                void copyMarkdownPath(target)
               }
             }
           },
@@ -266,9 +277,15 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
       <ActionSheetModal
         visible={agentSessionActionTarget != null}
         title={agentSessionActionTarget?.title || 'Chat'}
-        actions={closeWithBulkActions(agentSessionActionTarget, () =>
-          setAgentSessionActionTarget(null)
-        )}
+        actions={[
+          ...getMobileNativeChatCliForkActions({
+            controller,
+            tab: agentSessionActionTarget,
+            workspaceOnPairedHost: onPairedHost,
+            onDismiss: () => setAgentSessionActionTarget(null)
+          }),
+          ...closeWithBulkActions(agentSessionActionTarget, () => setAgentSessionActionTarget(null))
+        ]}
         onClose={() => setAgentSessionActionTarget(null)}
       />
       <ActionSheetModal
@@ -284,7 +301,8 @@ export function MobileSessionSheets({ controller }: { controller: MobileSessionC
               const combined = drafts
                 .map((draft) => `# ${draft.title}\n\n${draft.content}`)
                 .join('\n\n---\n\n')
-              void Clipboard.setStringAsync(combined)
+              void clipboard
+                .writeText(combined)
                 .then(() => {
                   setLeaveDrafts(null)
                   leaveSession()

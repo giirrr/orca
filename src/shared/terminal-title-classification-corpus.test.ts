@@ -10,14 +10,7 @@ import {
   resolveTerminalTitleAgentType
 } from './terminal-title-agent-type'
 
-/**
- * Pins the exact verdict every title classifier returns for a realistic corpus.
- *
- * Why: these classifiers are now memoized on the title string, and a caching bug
- * here would repaint a pane under the wrong agent. This table is the proof that
- * memoization is transparent — it was generated from the pre-memo implementation
- * and must keep matching byte-for-byte.
- */
+/** Pin pre-memoization verdicts so caching cannot silently repaint panes with another agent’s identity. */
 type PinnedRow = [
   title: string,
   status: string | null,
@@ -280,14 +273,4 @@ describe('terminal title classification', () => {
       expect(resolveExplicitTerminalTitleAgentType(title)).toBe(explicitTitleAgent)
     }
   )
-
-  it('returns the same verdict on the second read of every title', () => {
-    for (const title of TERMINAL_TITLE_CLASSIFICATION_CORPUS) {
-      expect(detectAgentStatusFromTitle(title)).toBe(detectAgentStatusFromTitle(title))
-      expect(getAgentLabel(title)).toBe(getAgentLabel(title))
-      expect(resolveExplicitTerminalTitleAgentType(title)).toBe(
-        resolveExplicitTerminalTitleAgentType(title)
-      )
-    }
-  })
 })

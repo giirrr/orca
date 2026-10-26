@@ -1,4 +1,4 @@
-import { isShellProcess } from '../../../shared/agent-detection'
+import { titleShowsNoAgent } from '../../../shared/agent-detection'
 import {
   isClaudeIdentityFrameTitle,
   resolveExplicitTerminalTitleAgentType
@@ -9,43 +9,36 @@ import {
 } from '../../../shared/agent-title-owner'
 import { isOpenCodeNativeTitle } from '../../../shared/opencode-terminal-title'
 import { resolvePaneAgentOwnerRecord } from '../../../shared/pane-agent-owner'
+import type { TerminalAgent } from '../../../shared/terminal-agent'
 import type { TuiAgent } from '../../../shared/tui-agent'
-
-// A shell name or the tab's neutral default title (where inferred-interrupt reset parks it); blank titles are no evidence.
-function titleShowsNoAgent(title: string, defaultTitle?: string): boolean {
-  const trimmed = title.trim()
-  return trimmed.length > 0 && (isShellProcess(trimmed) || trimmed === defaultTitle?.trim())
-}
+import { agentTypeToIconAgent } from './agent-status'
 
 /**
  * Resolves wrapper-compatible signal identity against the pane owner.
  */
-function resolveSignalAgentForLaunchOwner(
-  signalAgent: TuiAgent | null | undefined,
-  ownerAgent: TuiAgent | null,
+export function resolveSignalAgentForLaunchOwner(
+  signalAgent: TerminalAgent | null | undefined,
+  ownerAgent: TerminalAgent | null,
   ownerIsLaunch = false
-): TuiAgent | null {
+): TerminalAgent | null {
   if (!signalAgent) {
     return null
   }
-  return (resolveCompatibleAgentTypeForOwner(signalAgent, ownerAgent, { ownerIsLaunch }) ??
-    signalAgent) as TuiAgent
+  return agentTypeToIconAgent(
+    resolveCompatibleAgentTypeForOwner(signalAgent, ownerAgent, { ownerIsLaunch }) ?? signalAgent
+  )
 }
 
-/**
- * Probe-free evidence a launched agent exited: title shows no agent, no live
- * hook remains, and either the hook completed or observed activity vanished.
- * Vanished-activity is local-only — remote rows also drop on transport blips.
- */
+/** Without probes, missing title/hook plus completion or vanished local activity proves exit. Remote activity loss can be transport blips and must not count. */
 export function resolveLaunchedAgentExitEvidence(args: {
   title: string
   defaultTitle?: string
   isRemote: boolean
   hasObservedAgentSignal: boolean
-  hookAgent: TuiAgent | null
-  siblingHookAgent?: TuiAgent | null
+  hookAgent: TerminalAgent | null
+  siblingHookAgent?: TerminalAgent | null
   hasCompletedHook: boolean
-  processAgent?: TuiAgent | null
+  processAgent?: TerminalAgent | null
   processShellForeground?: boolean
 }): boolean {
   if (args.hookAgent || args.siblingHookAgent || args.processAgent) {
@@ -70,24 +63,24 @@ export function resolveTabAgentFromSignals(args: {
   isRemote: boolean
   title: string
   defaultTitle?: string
-  hookAgent: TuiAgent | null
-  siblingHookAgent?: TuiAgent | null
-  focusedCompletedHookAgent?: TuiAgent | null
-  siblingCompletedHookAgent?: TuiAgent | null
-  processAgent?: TuiAgent | null
+  hookAgent: TerminalAgent | null
+  siblingHookAgent?: TerminalAgent | null
+  focusedCompletedHookAgent?: TerminalAgent | null
+  siblingCompletedHookAgent?: TerminalAgent | null
+  processAgent?: TerminalAgent | null
   processShellForeground?: boolean
-  sleepingSessionAgent?: TuiAgent | null
+  sleepingSessionAgent?: TerminalAgent | null
   launchAgent?: TuiAgent
-}): TuiAgent | null {
+}): TerminalAgent | null {
   const launchAgent = args.launchAgent ?? null
-  // Durable focused-pane owner (launch intent → hook → session); focused-pane-scoped so a sibling can't re-own the focused title (would mislabel a Pi pane as OMP).
+  /** Focused-pane ownership follows launch → hook → session; sibling ownership cannot reinterpret this title (e.g. Pi as OMP). */
   const ownerRecord = resolvePaneAgentOwnerRecord({
     launchAgent,
     hookAgent: args.hookAgent,
     completedHookAgent: args.focusedCompletedHookAgent,
     sleepingSessionAgent: args.sleepingSessionAgent
   })
-  const owner = (ownerRecord?.agent ?? null) as TuiAgent | null
+  const owner = agentTypeToIconAgent(ownerRecord?.agent)
   const ownerIsLaunch = ownerRecord?.ownerIsLaunch === true
 
   // The live/idle split governs title override; siblings normalize against launch intent only.
@@ -114,13 +107,12 @@ export function resolveTabAgentFromSignals(args: {
   )
   const sleepingSessionAgent = args.sleepingSessionAgent ?? null
 
-  // Title carries identity only as a reuse override (names a DIFFERENT-group agent) or a legacy standalone id when no hook — same-group titles say nothing (OMP wraps Pi), so the record wins.
+  /** Titles identify only different-group reuse or legacy hookless agents; same-group titles (OMP wrapping Pi) defer to durable records. */
   const rawTitleAgent = resolveExplicitTerminalTitleAgentType(args.title)
   const explicitTitleAgent = resolveSignalAgentForLaunchOwner(rawTitleAgent, owner, ownerIsLaunch)
   const priorIdentity = idleFocusedIdentity ?? launchAgent
   const nativeOpenCodeTitle = explicitTitleAgent === 'opencode' && isOpenCodeNativeTitle(args.title)
-  // Why: a "claude" token in another agent's task text is a mention, not identity, so it must
-  // not take a pane from its known owner — only a title that PRESENTS Claude may (#8940).
+  // A task mentioning claude cannot take another agent’s pane; only titles presenting Claude establish identity (#8940).
   const titleClaimsIdentity =
     explicitTitleAgent !== 'claude' || isClaudeIdentityFrameTitle(args.title)
   // Why: native OpenCode titles can reclaim stale launch intent before any observed hook signal.
@@ -156,6 +148,9 @@ export function resolveTabAgentFromSignals(args: {
     processShellForeground: args.processShellForeground
   })
   const activeLaunchAgent = launchedAgentExited ? null : launchAgent
+  // Exit evidence retires sleeping occupancy too; stale records must not restore agent icons after local shell return.
+  const activeSleepingSessionAgent =
+    launchedAgentExited || processProvesShell ? null : sleepingSessionAgent
   // Why: re-own the foreground process within its title-identity group so OMP's nested pi (shell → omp → pi) can't flip an OMP-owned tab's icon.
   const processAgent = resolveSignalAgentForLaunchOwner(args.processAgent, owner, ownerIsLaunch)
   return (
@@ -163,7 +158,7 @@ export function resolveTabAgentFromSignals(args: {
     processAgent ??
     titleAgent ??
     idleFocusedIdentity ??
-    sleepingSessionAgent ??
+    activeSleepingSessionAgent ??
     activeLaunchAgent ??
     liveSiblingIdentity ??
     idleSiblingIdentity

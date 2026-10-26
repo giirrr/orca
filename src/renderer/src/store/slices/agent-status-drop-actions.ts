@@ -13,6 +13,7 @@ import {
   shouldReplaceRetainedWithLive
 } from './agent-status-pane-key-tab-binding'
 import { retireAgentPaneAuthorityAliasesByOwnerTab } from './agent-pane-authority'
+import { agentTurnEndedOnPurpose } from '../../../../shared/agent-main-agent-verdict'
 
 function removeAcknowledgement(
   acknowledgements: Record<string, number>,
@@ -45,8 +46,7 @@ export function createAgentStatusDropActions(
           (entry) => entry.paneKey === paneKey
         )
         const nextAck = removeAcknowledgement(s.acknowledgedAgentsByPaneKey, paneKey)
-        // Row dismissal keeps cutoff/manual-unread: the pane may still be live, and its next
-        // hook event would replay every cleared stateHistory event as unread without them.
+        // Dismissal preserves cutoff/manual-unread because live panes can republish cleared history.
         const nextClearedAt = opts?.paneRemoved
           ? removeAcknowledgement(s.activityClearedAtByPaneKey, paneKey)
           : s.activityClearedAtByPaneKey
@@ -162,7 +162,7 @@ export function createAgentStatusDropActions(
         if (
           liveEntry?.state === 'done' &&
           liveEntry.agentType !== undefined &&
-          liveEntry.interrupted !== true
+          !agentTurnEndedOnPurpose(liveEntry)
         ) {
           retainedEvidence.set(
             paneKey,

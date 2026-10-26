@@ -29,8 +29,7 @@ export function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
   }
 }
 
-// Binds the caller's hoisted tree-kill mock so test bodies keep calling
-// expectChildTerminated(child) with no extra argument.
+// Bind the hoisted Windows tree-kill mock; supervised POSIX stop uses SIGTERM in source-control-local-process.test.ts.
 export function createChildTerminationExpectation(
   terminateWindowsProcessTreeMock: ReturnType<typeof vi.fn>
 ): (child: { pid: number; kill: ReturnType<typeof vi.fn> }) => Promise<void> {
@@ -40,10 +39,15 @@ export function createChildTerminationExpectation(
         site: 'source-control-text-generation'
       })
     }
-    // Every platform kills the root by its own handle. On win32 that is not a
-    // duplicate of the tree walk: it is what keeps a refused walk from resolving
-    // having killed nothing while the caller releases the managed-home lock. It
-    // runs after the walk there, so it can be a tick behind the caller.
+    // Kill the owned root handle too so refused Windows tree walks cannot release the home lock having killed nothing; root kill follows the walk.
     await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGKILL'))
   }
+}
+
+/** Unwrap supervisor -- before inspecting the actual agent argv. */
+export function spawnedAgentArgv([file, args]: readonly unknown[]): unknown[] {
+  const argv: unknown[] = Array.isArray(args) ? args : []
+  return file === process.execPath && argv[0] === '-e'
+    ? argv.slice(argv.indexOf('--') + 1)
+    : [file, ...argv]
 }

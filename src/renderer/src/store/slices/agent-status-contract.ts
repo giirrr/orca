@@ -5,9 +5,11 @@ import type {
   AgentStatusOrchestrationContext,
   AgentType,
   MigrationUnsupportedPtyEntry,
-  ParsedAgentStatusPayload
+  ParsedAgentStatusPayload,
+  TurnEndDisposition
 } from '../../../../shared/agent-status-types'
 import type { AgentStatusObservation } from '../../../../shared/agent-status-observation'
+import type { ProgramStatusFacet } from '../../../../shared/program-status/facet'
 import type {
   AgentProviderSessionMetadata,
   ResumableTuiAgent,
@@ -43,16 +45,13 @@ export type DropHibernatedAgentPaneOptions = {
 }
 
 export type DropAgentStatusOptions = {
-  /** The pane itself is gone (pane close, stale-row teardown). Row-only dismissals leave the
-   *  cleared-at cutoff and manual-unread stamp in place so a still-live pane's next hook event
-   *  cannot resurrect activity the user already cleared. */
+  /** Pane death permits cutoff/manual-unread cleanup; row dismissal preserves them so later hooks cannot resurrect cleared history. */
   paneRemoved?: boolean
 }
 
 export type DropAgentStatusByTabPrefixOptions = {
   worktreeId?: string
-  /** Keep cleared-at cutoffs and manual-unread stamps: a mirrored-tab retraction is loss of
-   *  contact, not pane death, and the host republishes the same panes on reconnect. */
+  /** Retraction may be contact loss; preserve cutoff/manual-unread for same-pane reconnect republication. */
   preserveActivityClearedState?: boolean
 }
 
@@ -65,17 +64,6 @@ export type AgentLaunchConfigRegistrationMetadata = {
   providerSession?: AgentProviderSessionMetadata
 }
 
-export type AgentLaunchConfigStatusMetadata = {
-  paneKey: string
-  agentType?: AgentType
-  tabId?: string
-  terminalHandle?: string
-  launchToken?: string
-  providerSession?: AgentProviderSessionMetadata
-  existingProviderSession?: AgentProviderSessionMetadata
-  providerSessionChanged?: boolean
-}
-
 export type AgentLaunchConfigRegistryEntry = {
   launchConfig: SleepingAgentLaunchConfig
   registeredAt: number
@@ -83,12 +71,16 @@ export type AgentLaunchConfigRegistryEntry = {
 }
 
 export type AgentStatusPayload = ParsedAgentStatusPayload & {
+  subagentObservation?: AgentStatusEntry['subagentObservation']
+  /** The host's child views for a structured session; see `AgentStatusEntry.children`. */
+  children?: AgentStatusEntry['children']
   orchestration?: AgentStatusOrchestrationContext
   promptInteractionKey?: string
   restoredUnconfirmed?: boolean
-  /** Ingress provenance for this write (STA-4293). Read by nothing yet; a caller that omits
-   *  it produces exactly the entry it produces today. See agent-status-observation.ts. */
+  /** Optional ingress provenance, currently unread; omission preserves existing output (STA-4293, agent-status-observation.ts). */
   observation?: AgentStatusObservation
+  /** `null` clears the facet; absent keeps it (the writer has no facet channel, e.g. renderer OSC). */
+  programStatus?: ProgramStatusFacet | null
 }
 
 export type AgentStatusTiming = {
@@ -98,6 +90,11 @@ export type AgentStatusTiming = {
   /** Observation clock for staleness; see `AgentStatusEntry.evidenceObservedAt`. */
   evidenceObservedAt?: number
   stateStartedAt?: number
+  /** The host's turn start; see `AgentStatusEntry.turnStartedAt`. */
+  turnStartedAt?: number
+  /** The host's turn end; see `AgentStatusEntry.turnEndedAt`. */
+  turnEndedAt?: number
+  turnEndDisposition?: TurnEndDisposition
 }
 
 export type AgentStatusRouting = {
@@ -108,10 +105,14 @@ export type AgentStatusRouting = {
 }
 
 export type AgentStatusMetadata = {
+  authorityRestartId?: string
+  /** Structured status rows remain fresh while the host owns the session; cleared on feed loss. */
+  structuredHostOwned?: true
   providerSession?: AgentProviderSessionMetadata
   launchConfig?: SleepingAgentLaunchConfig
   launchToken?: string
   terminalResumeEligible?: false
+  paneOwner?: { agent: AgentType; session: string }
 }
 
 export type AgentStatusUpdate = {
@@ -144,7 +145,18 @@ export type AgentProviderSessionUpdate = {
   metadata?: AgentProviderSessionRecordMetadata
 }
 
-export type AgentStatusBatchUpdate = AgentStatusUpdate | AgentProviderSessionUpdate
+/** Patch only a live row's OSC 7501 facet; no state, timing, notification or attention effects. */
+export type AgentProgramStatusUpdate = {
+  kind: 'programStatus'
+  paneKey: string
+  /** `null` clears the facet. */
+  programStatus: ProgramStatusFacet | null
+}
+
+export type AgentStatusBatchUpdate =
+  | AgentStatusUpdate
+  | AgentProviderSessionUpdate
+  | AgentProgramStatusUpdate
 
 export type AgentStatusBatchTransaction = {
   getState: () => AppState

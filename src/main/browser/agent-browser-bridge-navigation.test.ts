@@ -26,8 +26,10 @@ vi.mock('electron', () => {
 })
 const { CdpWsProxyMock } = vi.hoisted(() => {
   const instances: unknown[] = []
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const MockClass = vi.fn().mockImplementation(function (this: any, _wc: unknown) {
+  const MockClass = vi.fn().mockImplementation(function (
+    this: Record<string, unknown>,
+    _wc: unknown
+  ) {
     this._wc = _wc
     this.start = vi.fn(async () => 'ws://127.0.0.1:9222')
     this.stop = vi.fn(async () => {})
@@ -52,6 +54,7 @@ vi.mock('./cdp-bridge', () => ({
 
 import { AgentBrowserBridge } from './agent-browser-bridge'
 import {
+  createFakeAgentBrowserChild,
   createSucceedWith,
   mockBrowserManager,
   mockWebContents,
@@ -123,8 +126,6 @@ describe('AgentBrowserBridge', () => {
       vi.useRealTimers()
     }
   })
-
-  // ── goto command ──
 
   it('navigates the registered webContents without spawning agent-browser', async () => {
     const wc = mockWebContents(100, 'https://example.com/start', 'Example')
@@ -409,7 +410,7 @@ describe('AgentBrowserBridge', () => {
               ''
             )
           }
-          return { kill: vi.fn() }
+          return createFakeAgentBrowserChild({ kill: vi.fn() })
         }
       )
 

@@ -4,6 +4,7 @@ import { getHistorySessionDirName } from './history-paths'
 import { isValidTerminalHistorySize } from './terminal-history-dimensions'
 import { readTerminalHistoryJson } from './terminal-history-file-reader'
 import { TERMINAL_HISTORY_META_MAX_BYTES } from './terminal-history-file-limits'
+import { PRIVATE_FILE_MODE, tightenPathMode } from './daemon-private-file-modes'
 
 export type SessionMeta = {
   cwd: string
@@ -28,7 +29,7 @@ export function readTerminalHistoryMeta(basePath: string, sessionId: string): Se
     const meta = readTerminalHistoryJson<unknown>(metaPath, TERMINAL_HISTORY_META_MAX_BYTES)
     return isSessionMeta(meta) ? { status: 'readable', meta } : { status: 'unreadable' }
   } catch (err) {
-    // Why: a concurrent cleanup/quarantine between existsSync and the read means no history, not corrupt history.
+    // Concurrent cleanup or quarantine can remove metadata between the existence check and read.
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
       return { status: 'missing' }
     }
@@ -44,13 +45,20 @@ export function readTerminalHistoryMetaFromDir(dir: string): SessionMeta | null 
   }
 }
 
+export function writeTerminalHistoryMeta(dir: string, meta: SessionMeta): void {
+  const metaPath = join(dir, 'meta.json')
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2), { mode: PRIVATE_FILE_MODE })
+  // Creation modes do not tighten existing files from older daemons.
+  tightenPathMode(metaPath, PRIVATE_FILE_MODE)
+}
+
 export function updateTerminalHistoryMeta(dir: string, updates: Partial<SessionMeta>): void {
   const meta = readTerminalHistoryMetaFromDir(dir)
   if (!meta) {
     return
   }
   Object.assign(meta, updates)
-  writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta, null, 2))
+  writeTerminalHistoryMeta(dir, meta)
 }
 
 function isSessionMeta(value: unknown): value is SessionMeta {

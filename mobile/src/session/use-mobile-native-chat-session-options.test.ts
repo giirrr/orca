@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { act, create, type ReactTestRenderer } from 'react-test-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MobileNativeChatSendOutcome } from './mobile-native-chat-send'
+import type { MobileNativeChatSendOutcome } from './native-chat/mobile-native-chat-send'
 import {
   clearMobileSessionOptionRecordsForTests,
   useMobileNativeChatSessionOptions,
@@ -73,6 +73,54 @@ describe('useMobileNativeChatSessionOptions', () => {
     expect(api!.snapshot).toEqual([])
   })
 
+  it('shows an OMP session under the model its hook reported', () => {
+    mount({ agent: 'omp' })
+    expect(api!.snapshot).toEqual([])
+    update({ reportedModel: 'deepseek/deepseek-v4-pro' })
+    const model = api!.snapshot[0]!
+    expect(model).toMatchObject({ id: 'model', category: 'model', valueSource: 'reported' })
+    expect(model.kind).toMatchObject({
+      type: 'select',
+      currentValue: 'deepseek/deepseek-v4-pro',
+      choices: [{ value: 'deepseek/deepseek-v4-pro', label: 'deepseek/deepseek-v4-pro' }]
+    })
+  })
+
+  it.each(['custom/current', 'deepseek/deepseek-v4-pro-new'])(
+    'keeps the exact OMP report %s with discovered choices',
+    (reportedModel) => {
+      mount({
+        agent: 'omp',
+        reportedModel,
+        discoveredModels: [{ id: 'deepseek/deepseek-v4-pro', label: 'DeepSeek', options: [] }]
+      })
+      expect(api!.snapshot[0]).toMatchObject({ valueSource: 'reported' })
+      expect(api!.snapshot[0]!.kind).toMatchObject({
+        currentValue: reportedModel,
+        choices: expect.arrayContaining([expect.objectContaining({ value: reportedModel })])
+      })
+    }
+  )
+
+  it('switches an OMP session with /orca-model <selector>', async () => {
+    mount({
+      agent: 'omp',
+      reportedModel: 'deepseek/deepseek-v4-pro',
+      modelSwitchCommand: 'orca-model'
+    })
+    let applied: boolean | undefined
+    await act(async () => {
+      applied = await api!.setOption('model', 'minimax-cn/MiniMax-M3')
+    })
+    expect(applied).toBe(true)
+    expect(dispatchCommand).toHaveBeenCalledWith('/orca-model minimax-cn/MiniMax-M3')
+    const model = api!.snapshot[0]!
+    expect(model).toMatchObject({ valueSource: 'dispatched' })
+    expect(model.kind).toMatchObject({ currentValue: 'minimax-cn/MiniMax-M3' })
+    update({ reportedModel: 'minimax-cn/MiniMax-M3' })
+    expect(api!.snapshot[0]).toMatchObject({ valueSource: 'reported' })
+  })
+
   it('applies a model pick through the catalog modelApply command', async () => {
     mount()
     let applied: boolean | undefined
@@ -106,6 +154,31 @@ describe('useMobileNativeChatSessionOptions', () => {
     expect(dispatchCommand).toHaveBeenCalledWith('/model', { delivery: 'type' })
     expect(onAgentPicker).toHaveBeenCalledOnce()
   })
+
+  it.each([null, 'gpt-5.6-terra'])(
+    'tracks an unlisted Codex report after %s without inventing effort choices',
+    async (initialModel) => {
+      mount({ agent: 'codex', reportedModel: initialModel })
+      update({ reportedModel: 'gpt-6.1-sol' })
+      expect(api!.snapshot).toHaveLength(1)
+      expect(api!.snapshot[0]).toMatchObject({
+        valueSource: 'reported',
+        action: { type: 'agent-picker' },
+        kind: {
+          currentValue: 'gpt-6.1-sol',
+          choices: expect.arrayContaining([{ value: 'gpt-6.1-sol', label: 'gpt-6.1-sol' }])
+        }
+      })
+      const snapshot = api!.snapshot
+      update({ reportedModel: null })
+      update({ reportedModel: 'gpt-6.1-sol' })
+      expect(api!.snapshot).toBe(snapshot)
+      await act(async () => {
+        await api!.invokeAction('model')
+      })
+      expect(dispatchCommand).toHaveBeenCalledWith('/model', { delivery: 'type' })
+    }
+  )
 
   it('types the Codex effort picker command', async () => {
     mount({ agent: 'codex', reportedModel: 'gpt-5.5' })
@@ -154,13 +227,11 @@ describe('useMobileNativeChatSessionOptions', () => {
       applied = api!.setOption('effort', 'low')
       await Promise.resolve()
     })
-    // A report lands while `/effort low` is still in flight and moves the model.
     update({ reportedModel: 'claude-opus-5' })
     await act(async () => {
       resolvers[0]!('accepted')
       await applied
     })
-    // The effort must not be recorded against Opus — it was sent for Sonnet.
     const effort = api!.snapshot.find((descriptor) => descriptor.id === 'effort')
     expect(effort?.kind).not.toMatchObject({ currentValue: 'low' })
   })
@@ -171,8 +242,7 @@ describe('useMobileNativeChatSessionOptions', () => {
       await api!.setOption('model', 'opus')
     })
     expect(api!.snapshot[0]!.kind).toMatchObject({ currentValue: 'opus' })
-    // Leaving the tab and returning re-delivers the SAME session-start report,
-    // which cannot have observed the `/model opus` sent after it.
+    // Re-entering repeats session-start evidence that predates later user picks.
     update({ scopeKey: 'host\0worktree\0other' })
     update({ scopeKey: 'host\0worktree\0tab' })
     expect(api!.snapshot[0]).toMatchObject({ valueSource: 'dispatched' })
@@ -194,8 +264,7 @@ describe('useMobileNativeChatSessionOptions', () => {
     await act(async () => {
       await api!.setOption('model', 'opus')
     })
-    // Far more scopes than the cap, revisiting the live tab in between the way a
-    // chat↔terminal flip does — insertion-order eviction would shed it.
+    // Repeatedly touch the live tab while exceeding capacity so insertion-order eviction would lose it.
     for (let index = 0; index < 40; index += 1) {
       update({ scopeKey: `host\0worktree\0overflow-${index}` })
       update({ scopeKey: 'host\0worktree\0tab' })

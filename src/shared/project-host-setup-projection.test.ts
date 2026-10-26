@@ -38,8 +38,7 @@ describe('project host setup projection', () => {
     expect(second.setups[0]?.updatedAt).toBe(first.setups[0]?.updatedAt)
   })
 
-  // Why both orders: repo order comes from disk/host enumeration, so it must not decide the
-  // project's timestamps. The accumulator carries 0 when the *first* sibling is the unknown one.
+  // Unknown timestamps may occur first in host/disk order; neither order may erase known sibling times.
   const timestampedSibling = repo({
     id: 'local-repo',
     path: '/Users/alice/orca',
@@ -471,8 +470,7 @@ describe('project host setup projection', () => {
       })
     ])
 
-    // Why: display names are labels, not identity. A future fix needs a
-    // normalized git remote identity or an explicit user link before merging.
+    // Display names cannot prove identity; merge only with normalized remote identity or explicit user linking.
     expect(projection.projects).toHaveLength(3)
   })
 
@@ -632,8 +630,7 @@ describe('isProjectRemoteIdentityPending', () => {
 describe('derived project identity stability', () => {
   const base = { id: 'r', path: '/r', displayName: 'r' } as const
 
-  // Why pinned: this id is the persisted Project primary key, so folding a host alias here would
-  // silently re-key existing projects on upgrade and drop their runtime preference.
+  // Persisted Project keys cannot fold host aliases on upgrade without dropping runtime preferences.
   it('keeps a www. remote provider-neutral instead of folding it onto github.com', () => {
     const projection = projectHostSetupProjectionFromRepos([
       repo({
@@ -683,4 +680,34 @@ describe('getProjectHostSetupWorktreeMeta host selection', () => {
 
     expect(getProjectHostSetupWorktreeMeta(setups, sshRepo).hostId).toBe('ssh:build-box')
   })
+})
+
+it('appends project source IDs without repeatedly copying an accumulating array', () => {
+  const repos = Array.from({ length: 2000 }, (_, i) =>
+    repo({
+      id: `source-${i}`,
+      path: `/repos/${i}`,
+      displayName: `Repo ${i}`,
+      upstream: { owner: 'acme', repo: 'project' }
+    })
+  )
+  let copied = 0
+  const iterator = Array.prototype[Symbol.iterator]
+  Array.prototype[Symbol.iterator] = function (this: unknown[]) {
+    if (this[0] === 'source-0') {
+      copied += this.length
+    }
+    return iterator.call(this)
+  }
+  let result: ReturnType<typeof projectHostSetupProjectionFromRepos>
+  try {
+    result = projectHostSetupProjectionFromRepos([...repos, repos[0]])
+  } finally {
+    Array.prototype[Symbol.iterator] = iterator
+  }
+  expect(copied).toBeLessThan(10_000)
+  expect(result.projects).toHaveLength(1)
+  expect(result.projects[0].sourceRepoIds).toEqual(repos.map((repo) => repo.id))
+  expect(result.setups).toHaveLength(2001)
+  expect(repos[0].displayName).toBe('Repo 0')
 })

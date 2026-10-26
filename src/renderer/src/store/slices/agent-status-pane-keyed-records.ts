@@ -3,22 +3,23 @@ export const RECENTLY_RETIRED_AGENT_STATUS_PANE_KEYS_MAX = 1024
 
 // delete-then-set for LRU recency, then evict oldest keys past the cap (Record iterates
 // insertion order); safe because a status for a tab closed >MAX tabs ago cannot still arrive.
-function boundLruKeyRecord(
-  existing: Record<string, true>,
+function boundLruKeyRecord<Value extends true | string>(
+  existing: Record<string, Value>,
   additions: ReadonlySet<string>,
-  max: number
-): Record<string, true> {
-  if (isLruKeyRecordUnchanged(existing, additions, max)) {
+  max: number,
+  value: Value
+): Record<string, Value> {
+  if (isLruKeyRecordUnchanged(existing, additions, max, value)) {
     return existing
   }
-  const next: Record<string, true> = {}
+  const next: Record<string, Value> = {}
   for (const key of Object.keys(existing)) {
     if (!additions.has(key)) {
-      next[key] = true
+      next[key] = existing[key]
     }
   }
   for (const key of additions) {
-    next[key] = true
+    next[key] = value
   }
   const keys = Object.keys(next)
   for (const stale of keys.slice(0, -max)) {
@@ -27,14 +28,12 @@ function boundLruKeyRecord(
   return next
 }
 
-// The rebuild is a no-op only when nothing would be evicted and the additions are
-// already the tail of `existing` in that same relative order. A matching key SET is
-// not enough: re-adding a key moves it to the tail, and that order decides which key
-// the cap evicts next, so a stale-order hit would un-fence a recently retired pane.
-function isLruKeyRecordUnchanged(
-  existing: Record<string, true>,
+/** No-op requires no eviction and additions already ordered at the tail. Equal key sets with stale order would evict recently retired panes. */
+function isLruKeyRecordUnchanged<Value extends true | string>(
+  existing: Record<string, Value>,
   additions: ReadonlySet<string>,
-  max: number
+  max: number,
+  value: Value
 ): boolean {
   const keys = Object.keys(existing)
   if (keys.length > max || additions.size > keys.length) {
@@ -42,7 +41,7 @@ function isLruKeyRecordUnchanged(
   }
   let index = keys.length - additions.size
   for (const key of additions) {
-    if (keys[index++] !== key) {
+    if (keys[index++] !== key || existing[key] !== value) {
       return false
     }
   }
@@ -53,14 +52,25 @@ export function boundRecentlyClosedAgentStatusTabIds(
   existing: Record<string, true>,
   tabId: string
 ): Record<string, true> {
-  return boundLruKeyRecord(existing, new Set([tabId]), RECENTLY_CLOSED_AGENT_STATUS_TAB_IDS_MAX)
+  return boundLruKeyRecord(
+    existing,
+    new Set([tabId]),
+    RECENTLY_CLOSED_AGENT_STATUS_TAB_IDS_MAX,
+    true
+  )
 }
 
 export function boundRecentlyRetiredAgentStatusPaneKeys(
-  existing: Record<string, true>,
-  paneKeys: readonly string[]
-): Record<string, true> {
-  return boundLruKeyRecord(existing, new Set(paneKeys), RECENTLY_RETIRED_AGENT_STATUS_PANE_KEYS_MAX)
+  existing: Record<string, true | string>,
+  paneKeys: readonly string[],
+  retirementId: true | string = true
+): Record<string, true | string> {
+  return boundLruKeyRecord(
+    existing,
+    new Set(paneKeys),
+    RECENTLY_RETIRED_AGENT_STATUS_PANE_KEYS_MAX,
+    retirementId
+  )
 }
 
 export function movePaneKeyedRecord<T>(
@@ -83,15 +93,16 @@ export function removePaneKeys<T>(
   record: Record<string, T>,
   paneKeys: ReadonlySet<string>
 ): Record<string, T> {
-  const matchingKeys = Object.keys(record).filter((key) => paneKeys.has(key))
-  if (matchingKeys.length === 0) {
-    return record
-  }
-  const next = { ...record }
-  for (const key of matchingKeys) {
+  // Probe requested own enumerable keys and clone on first match. Retirement touches many usually-empty records; retain no-op identity and exclude inherited toString/__proto__.
+  let next: Record<string, T> | null = null
+  for (const key of paneKeys) {
+    if (!Object.prototype.propertyIsEnumerable.call(record, key)) {
+      continue
+    }
+    next ??= { ...record }
     delete next[key]
   }
-  return next
+  return next ?? record
 }
 
 export function removePaneKeysByTabPrefix<T>(
@@ -104,4 +115,28 @@ export function removePaneKeysByTabPrefix<T>(
     (key) => key.startsWith(prefix) || extraPaneKeys.has(key)
   )
   return removePaneKeys(record, new Set(matchingKeys))
+}
+
+/** A closed physical key revokes recovery for its whole retired alias group. */
+export function closedAgentStatusRetirementKeys(
+  existing: Record<string, true | string>,
+  prefix: string,
+  aliasPaneKeys: readonly string[]
+): string[] {
+  const keys = new Set(aliasPaneKeys)
+  const ids = new Set<string>()
+  for (const [key, value] of Object.entries(existing)) {
+    if (key.startsWith(prefix) || keys.has(key)) {
+      keys.add(key)
+      if (typeof value === 'string') {
+        ids.add(value)
+      }
+    }
+  }
+  for (const [key, value] of Object.entries(existing)) {
+    if (typeof value === 'string' && ids.has(value)) {
+      keys.add(key)
+    }
+  }
+  return [...keys]
 }

@@ -1,22 +1,13 @@
 import type { AppState } from '../types'
 import type { AgentStatusEntry } from '../../../../shared/agent-status-types'
-import {
-  getAgentResumeArgv,
-  isResumableTuiAgent,
-  type SleepingAgentLaunchConfig,
-  type SleepingAgentSessionRecord
+import { agentTurnEndedUncleanly } from '../../../../shared/agent-main-agent-verdict'
+import type {
+  SleepingAgentLaunchConfig,
+  SleepingAgentSessionRecord
 } from '../../../../shared/agent-session-resume'
+import { resumeRecordFromStatus } from '../../../../shared/agent-resume-record-from-status'
 import type { TerminalTab } from '../../../../shared/terminal-tab-types'
 import { findTabForAgentEntry } from './agent-status-pane-key-tab-binding'
-
-export function copyLaunchConfig(config: SleepingAgentLaunchConfig): SleepingAgentLaunchConfig {
-  return {
-    ...(config.agentCommand ? { agentCommand: config.agentCommand } : {}),
-    agentArgs: config.agentArgs,
-    agentEnv: { ...config.agentEnv },
-    ...(config.ompResumeFilePath ? { ompResumeFilePath: config.ompResumeFilePath } : {})
-  }
-}
 
 export function sleepingRecordFromEntry(args: {
   state: AppState
@@ -27,39 +18,11 @@ export function sleepingRecordFromEntry(args: {
   launchConfig?: SleepingAgentLaunchConfig
   origin?: SleepingAgentSessionRecord['origin']
 }): SleepingAgentSessionRecord | null {
-  const agent = args.entry.agentType
-  if (
-    args.entry.terminalResumeEligible === false ||
-    !isResumableTuiAgent(agent) ||
-    !args.entry.providerSession
-  ) {
-    return null
-  }
-  if (!getAgentResumeArgv(agent, args.entry.providerSession)) {
-    return null
-  }
-  const tab = args.tab ?? findTabForAgentEntry(args.state, args.worktreeId, args.entry)
-  return {
-    paneKey: args.entry.paneKey,
-    ...(tab ? { tabId: tab.id } : {}),
-    worktreeId: args.worktreeId,
-    agent,
-    providerSession: args.entry.providerSession,
-    ...(args.entry.connectionId !== undefined ? { connectionId: args.entry.connectionId } : {}),
-    prompt: args.entry.prompt,
-    state: args.entry.state,
-    capturedAt: args.capturedAt,
-    updatedAt: args.entry.updatedAt,
-    ...((args.entry.terminalTitle ?? tab?.title)
-      ? { terminalTitle: (args.entry.terminalTitle ?? tab?.title)! }
-      : {}),
-    ...(args.entry.lastAssistantMessage
-      ? { lastAssistantMessage: args.entry.lastAssistantMessage }
-      : {}),
-    ...(args.launchConfig ? { launchConfig: copyLaunchConfig(args.launchConfig) } : {}),
-    ...(args.entry.interrupted ? { interrupted: true } : {}),
-    ...(args.origin ? { origin: args.origin } : {})
-  }
+  const { state, tab, ...record } = args
+  return resumeRecordFromStatus({
+    ...record,
+    tabOf: () => tab ?? findTabForAgentEntry(state, args.worktreeId, args.entry)
+  })
 }
 
 export type CollectSleepingAgentSessionRecordsOptions = {
@@ -79,33 +42,31 @@ export function normalizeSleepingAgentSessionCollectOptions(
 }
 
 export function isValidCompletedAgentHibernationEntry(entry: AgentStatusEntry): boolean {
-  return entry.state === 'done' && entry.interrupted !== true
+  return entry.state === 'done' && !agentTurnEndedUncleanly(entry)
 }
 
-// Why: a finished pane is passive wake evidence, and a mobile wake background-mounts every passive
-// record's tab. Sleeping a workspace must not become "one phone tap respawns all of it" — the pane
-// issues its own `--resume` cold restore when its tab is opened instead (#11598).
+// Done recovery stays passive: mobile wake background-mounts passive tabs and would respawn all work. Restore via --resume only when opened (#11598).
 export function markManualSleepLazyRestore(record: SleepingAgentSessionRecord): void {
   if (record.state === 'done') {
     record.restoreOnTabOpenOnly = true
   }
 }
 
-// Why: `live`/legacy rows are provisional checkpoints a fresh capture supersedes; an explicit
-// sleep or quit capture is the pane's only resume handle once its live row is gone.
+// Fresh captures replace provisional live/legacy checkpoints; explicit sleep/quit records may be the only surviving resume handle.
 export function isDurableSleepingCapture(record: SleepingAgentSessionRecord): boolean {
   return record.origin === 'worktree-sleep' || record.origin === 'quit'
 }
 
-// Why: manual sleep kills the pty either way, so the record carries resume identity, not the dead
-// turn's interrupt flag — and an explicitly slept workspace is never stale at wake, so a row the
-// user is deliberately sleeping must not trip the wake-side staleness discard. `state` is preserved
-// so a done pane wakes lazily in place instead of spawning a new tab.
+// Manual sleep kills PTY; capture resume identity without wake-side staleness discard. Preserve state so done panes resume lazily in place.
 export function manualSleepCaptureEntry(
   entry: AgentStatusEntry,
   capturedAt: number
 ): AgentStatusEntry {
-  return { ...entry, updatedAt: capturedAt, interrupted: false }
+  if (!entry.mainAgent) {
+    return { ...entry, updatedAt: capturedAt, interrupted: false }
+  }
+  const { outcome: _outcome, ...mainAgent } = entry.mainAgent
+  return { ...entry, updatedAt: capturedAt, interrupted: false, mainAgent }
 }
 
 export function removeSleepingRecordsReplacedByManualWorktreeSleep(
@@ -121,8 +82,7 @@ export function removeSleepingRecordsReplacedByManualWorktreeSleep(
     if (record.worktreeId !== worktreeId || (allowedPaneKeys && !allowedPaneKeys.has(paneKey))) {
       continue
     }
-    // Why: a repeat sleep must not delete a durable record this capture cannot re-derive — the
-    // pane was never woken, so it has no live status row to rebuild it from (#11598).
+    // Repeated sleep lacks live rows for never-woken panes; retain durable records it cannot rederive (#11598).
     if (!replacements?.[paneKey] && isDurableSleepingCapture(record)) {
       continue
     }

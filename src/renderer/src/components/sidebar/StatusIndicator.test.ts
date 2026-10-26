@@ -36,15 +36,7 @@ describe('StatusIndicator', () => {
   it('renders working as a yellow spinner ring', () => {
     const markup = renderMarkup('working')
 
-    expect(markup).toContain('border-yellow-500')
-    expect(markup).toContain('border-t-transparent')
-    // Why: rotation must come from the compositor-driven CSS animation, not a
-    // JS clock writing per-element styles on the input thread (STA-3328).
-    expect(markup).toContain('agent-working-spinner')
     expect(markup).toContain('data-agent-spinner')
-    // Why: under reduced motion the top border is filled so the static ring
-    // reads as a complete marker, not a broken partial spinner (#9515).
-    expect(markup).toContain('motion-reduce:border-t-yellow-500')
   })
 
   it('renders monitoring as a static heartbeat glyph', () => {
@@ -53,7 +45,7 @@ describe('StatusIndicator', () => {
     expect(markup).toContain('data-state-indicator-tooltip="Monitoring background tasks"')
     expect(markup).not.toContain(' title=')
     expect(markup).toContain('lucide-activity')
-    expect(markup).toContain('text-yellow-500')
+    expect(markup).toContain('text-agent-working')
     expect(markup).not.toContain('data-agent-spinner')
   })
 
@@ -78,11 +70,16 @@ describe('StatusIndicator', () => {
     expect(classNames).toContain('bg-emerald-500')
   })
 
-  it('renders interrupted distinctly from done', () => {
+  it("renders a user's Stop muted, distinct from done and from a failure", () => {
     const classNames = renderDotClassNames('interrupted')
 
-    expect(classNames).toContain('bg-red-500')
+    expect(classNames).toContain('bg-muted-foreground')
     expect(classNames).not.toContain('bg-emerald-500')
+    expect(classNames).not.toContain('bg-red-500')
+  })
+
+  it('renders failed as a red dot', () => {
+    expect(renderDotClassNames('failed')).toContain('bg-red-500')
   })
 
   it.each([

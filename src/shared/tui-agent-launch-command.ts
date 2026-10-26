@@ -3,6 +3,7 @@ import {
   resolveAgentSessionOptionLaunch
 } from './agent-session-option-launch'
 import type { SessionOptionValue } from './native-chat-session-options'
+import { agentArgTerminatorIndex } from './agent-session-option-agent-args'
 import { getTuiAgentLaunchCommand, TUI_AGENT_CONFIG } from './tui-agent-config'
 import {
   planAgentCliArgsSuffix,
@@ -11,6 +12,11 @@ import {
   type AgentStartupShell
 } from './tui-agent-startup-shell'
 import type { TuiAgent } from './tui-agent'
+
+// Why: Enter on Codex's "Update available" screen picks "Update now", which installs and exits.
+const STARTUP_UPDATE_PROMPT_SUPPRESSION_ARGS: Partial<Record<TuiAgent, readonly string[]>> = {
+  codex: ['-c', 'check_for_update_on_startup=false']
+}
 
 export type ResolvedAgentLaunchCommand =
   | {
@@ -30,6 +36,8 @@ export function resolveAgentLaunchCommand(args: {
   sessionOptions?: Record<string, SessionOptionValue>
   sessionOptionsOverrideAgentArgs?: boolean
   isRemote?: boolean
+  /** Launch-only, like session options: a resumed session must not inherit it. */
+  suppressStartupUpdatePrompt?: boolean
 }): ResolvedAgentLaunchCommand {
   const override = args.cmdOverrides[args.agent]
   const command =
@@ -37,6 +45,12 @@ export function resolveAgentLaunchCommand(args: {
     getTuiAgentLaunchCommand(TUI_AGENT_CONFIG[args.agent], args.platform, {
       isRemote: args.isRemote
     })
+  const suppressionArgs = args.suppressStartupUpdatePrompt
+    ? (STARTUP_UPDATE_PROMPT_SUPPRESSION_ARGS[args.agent] ?? [])
+    : []
+  const launchHead = suppressionArgs.length
+    ? `${command} ${suppressionArgs.map((arg) => quoteStartupArg(arg, args.shell)).join(' ')}`
+    : command
   const suffix = planAgentCliArgsSuffix(args.agentArgs, args.shell)
   if (!suffix.ok) {
     return suffix
@@ -78,16 +92,17 @@ export function resolveAgentLaunchCommand(args: {
   }
   const optionSuffix = resolvedOptions.args.map((arg) => quoteStartupArg(arg, args.shell)).join(' ')
   const commandWithoutSessionOptions = suffix.suffix ? `${command} ${suffix.suffix}` : command
-  const commandWithOptions = optionSuffix ? `${command} ${optionSuffix}` : command
+  const commandWithOptions = optionSuffix ? `${launchHead} ${optionSuffix}` : launchHead
   const overrideTokens = args.sessionOptionsOverrideAgentArgs
     ? insertBeforeTerminator(
+        args.agent,
         removeOverriddenAgentSessionArgs(args.agent, args.sessionOptions, trailingTokens.tokens),
         resolvedOptions.args
       )
     : []
   const commandWithOverrides = overrideTokens.length
-    ? `${command} ${overrideTokens.map((token) => quoteStartupArg(token, args.shell)).join(' ')}`
-    : command
+    ? `${launchHead} ${overrideTokens.map((token) => quoteStartupArg(token, args.shell)).join(' ')}`
+    : launchHead
   return {
     ok: true,
     command: args.sessionOptionsOverrideAgentArgs
@@ -100,10 +115,11 @@ export function resolveAgentLaunchCommand(args: {
   }
 }
 
-function insertBeforeTerminator(tokens: readonly string[], inserted: readonly string[]): string[] {
-  const terminator = tokens.indexOf('--')
-  if (terminator === -1) {
-    return [...tokens, ...inserted]
-  }
+function insertBeforeTerminator(
+  agent: TuiAgent,
+  tokens: readonly string[],
+  inserted: readonly string[]
+): string[] {
+  const terminator = agentArgTerminatorIndex(agent, tokens)
   return [...tokens.slice(0, terminator), ...inserted, ...tokens.slice(terminator)]
 }

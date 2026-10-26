@@ -1,5 +1,5 @@
+import { makePaneKey } from '../../../../../shared/stable-pane-id'
 import { useAppStore } from '@/store'
-import { containsStatefulRendererQuery } from '../../../../../shared/terminal-reply-query-extraction'
 import { takeCurrentTerminalDeliveryCredit } from '@/lib/pane-manager/terminal-delivery-credit'
 import { recordAgentHibernationPaneOutput } from '@/lib/agent-hibernation-output-activity'
 import { observeTerminalBracketedPasteModeOutput } from '../terminal-bracketed-paste'
@@ -47,6 +47,7 @@ export function bindLiveDataCallback(session: ConnectPanePtySession): void {
       } else {
         // Why: main dropped buffered output at the pending cap, so the stream has a gap; repaint from the main-owned snapshot instead of writing on.
         session.markHiddenOutputRestoreNeeded()
+        // Discarded sentinel bytes must not enter the PTY writer and consume pending restore; snapshot reset releases DEC 2026 when recovery arrives.
         if (data) {
           // The sentinel can carry query bytes carved from the bulk drop (extractDroppedPtyQueryBytes in main); replies must still flow.
           session.salvageRendererQueriesFromDiscardedRestoreData(data)
@@ -59,7 +60,12 @@ export function bindLiveDataCallback(session: ConnectPanePtySession): void {
     // Why: under main side-effect authority these facts arrive via pty:sideEffect; byte-scanning here would double-fire. Remote PTYs / kill-switch-off keep this path.
     if (!session.mainSideEffectAuthority) {
       for (const link of session.observeTerminalGitHubPRLink(data)) {
-        useAppStore.getState().observeTerminalGitHubPullRequestLink(session.deps.worktreeId, link)
+        useAppStore.getState().observeTerminalGitHubPullRequestLink(session.deps.worktreeId, link, {
+          tabId: session.deps.tabId,
+          paneKey: makePaneKey(session.deps.tabId, session.pane.leafId),
+          ptyId: session.transport.getPtyId(),
+          executionHostId: session.transport.getExecutionHostId?.() ?? undefined
+        })
       }
       session.commandLifecycle.handlePtyData(data)
     }
@@ -140,14 +146,7 @@ export function bindLiveDataCallback(session: ConnectPanePtySession): void {
     const restoreAppliesToCurrentPty =
       session.hiddenOutputRestorePtyId !== null &&
       session.transport.getPtyId() === session.hiddenOutputRestorePtyId
-    const skipBackgroundAlternateScreenFrame =
-      meta?.background === true &&
-      shouldWritePtyOutputForeground(session.deps.isVisibleRef.current) &&
-      session.pane.terminal.buffer.active.type === 'alternate' &&
-      !containsStatefulRendererQuery(orderedRendererData)
-    if (skipBackgroundAlternateScreenFrame) {
-      session.skipBackgroundAlternateScreenOutput(orderedRendererData)
-    } else if (session.shouldSkipHiddenRendererOutput(foreground, orderedRendererData)) {
+    if (session.shouldSkipHiddenRendererOutput(foreground, orderedRendererData)) {
       session.skipHiddenRendererOutput(orderedRendererData)
     } else if (
       (session.hiddenOutputRestoreNeeded || session.hiddenOutputRestoreInFlight) &&
@@ -171,7 +170,7 @@ export function bindLiveDataCallback(session: ConnectPanePtySession): void {
           hiddenStartupRendererQuery: true
         })
       }
-      session.writePtyOutputToXterm(orderedRendererData, foreground)
+      session.writePtyOutputToXterm(orderedRendererData, foreground, { liveStartupBatch: true })
       if (foreground) {
         session.recordRendererOrderedSeq(rendererMeta)
       }
